@@ -1,0 +1,84 @@
+# =============================================================================
+# Runtime settings. Everything here can be changed at runtime from Telegram
+# (/filters) - overrides are stored in the `settings` DB table and take
+# precedence over this file without a restart.
+# =============================================================================
+
+filters:
+  # Budget thresholds (job currency is converted into RUB and USD first)
+  min_budget_rub: 1500
+  min_budget_usd: 20
+  # Competition
+  max_proposals: 5
+  allow_unknown_proposals: true      # keep jobs whose proposal counter is unavailable
+  # Notification threshold
+  min_notify_score: 55
+  # "Договорная" jobs
+  allow_negotiable: true
+  # Freshness
+  max_age_minutes: 1440
+  # Keyword / regex drills. Empty include list means "all categories".
+  include_keywords: []
+  include_regex: []
+  exclude_keywords:
+    - казино
+    - casino
+    - ставки
+    - ставок
+    - букмекер
+    - за отзыв
+    - за отзывы
+    - без оплаты
+    - безвозмездно
+    - бесплатно
+    - 18+
+    - интим
+    - дропы
+    - обнал
+    - скам
+    - "за 50 рублей"
+  exclude_regex: []
+  # Never notify about these sources
+  exclude_sources: []
+  # Quiet hours (jobs keep collecting, digest is sent afterwards)
+  quiet_hours:
+    enabled: false
+    start: "00:00"
+    end: "08:00"
+  # First launch on an empty DB: index everything silently instead of spamming 200 old cards
+  cold_start_mode: silent_seed       # silent_seed | notify_all
+  send_top_n_on_start: 0             # e.g. 3 - also send the 3 freshest jobs on first launch
+
+scoring:
+  weights:
+    freshness: 25
+    competition: 25
+    budget: 20
+    client: 15
+    text: 15
+  # A job younger than this gets the maximum freshness bonus
+  fresh_window_minutes: 15
+
+llm:
+  enabled: false
+  # Any OpenAI-compatible endpoint. For Ollama use http://localhost:11434/v1
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  timeout: 45
+  # Blend: final = base * base_weight + llm * (1 - base_weight)
+  base_weight: 0.65
+
+engine:
+  max_concurrency: 6
+  # Minimum delay between two Telegram messages
+  notify_throttle_seconds: 1.2
+  # Live re-check offsets for already sent cards (minutes after sending)
+  live_update_offsets_minutes: [3, 10, 30]
+  # A card is marked as stale when proposals >= max_proposals * factor
+  live_stale_proposals_factor: 2
+  # Absolute proposal ceiling for the "many proposals" warning
+  live_stale_proposals_absolute: 10
+  # How many hours back cross-marketplace deduplication looks
+  dedupe_window_hours: 48
+  # Similarity threshold for cross-marketplace matching (0..1)
+  dedupe_similarity: 0.88

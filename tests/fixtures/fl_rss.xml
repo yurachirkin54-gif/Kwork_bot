@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Заказы на FL.ru</title>
+    <link>https://www.fl.ru</link>
+    <description>Лента заказов</description>
+    <item>
+      <title><![CDATA[Сделать лендинг (Бюджет: 3 000 &#8381;)]]></title>
+      <link>https://www.fl.ru/projects/5529621/landing.html</link>
+      <guid>https://www.fl.ru/projects/5529621/landing.html</guid>
+      <description><![CDATA[Нужен лендинг на чистом HTML/CSS. Требования: адаптив, форма заявки.]]></description>
+      <category><![CDATA[Разработка / Веб]]></category>
+      <pubDate>Tue, 17 Nov 2026 15:38:21 GMT</pubDate>
+    </item>
+    <item>
+      <title><![CDATA[Доработать скрипт на Python (Бюджет: 12 000 &#8381;)]]></title>
+      <link>https://www.fl.ru/projects/5529609/script-python.html</link>
+      <guid>https://www.fl.ru/projects/5529609/script-python.html</guid>
+      <description><![CDATA[Есть скрипт на Python, нужно добавить интеграцию с API. 2 отклика.]]></description>
+      <category><![CDATA[Программирование]]></category>
+      <pubDate>Tue, 17 Nov 2026 14:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

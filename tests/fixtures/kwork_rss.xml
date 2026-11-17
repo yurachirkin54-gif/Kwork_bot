@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Kwork - новые проекты</title>
+    <link>https://kwork.ru</link>
+    <description>Свежие проекты</description>
+    <item>
+      <title>Сделаю парсер каталога на Python за 5000 руб.</title>
+      <link>https://kwork.ru/script-programming/55524084/parser-kataloga?ref=10903</link>
+      <guid>https://kwork.ru/script-programming/55524084/parser-kataloga</guid>
+      <description><![CDATA[<img src="https://cdn.kwork.ru/x.jpg" /><p>Нужен парсер каталога. Требования: Python, requests, выгрузка в CSV. Срок 2 дня.</p>]]></description>
+      <category>Разработка и IT</category>
+      <pubDate>Tue, 17 Nov 2026 18:49:00 +0300</pubDate>
+    </item>
+    <item>
+      <title>Настрою Docker и Docker Compose за 4000 руб.</title>
+      <link>https://kwork.ru/server-administration/55524081/docker-compose?ref=10903</link>
+      <guid>https://kwork.ru/server-administration/55524081/docker-compose</guid>
+      <description><![CDATA[<p>Нужно поднять проект в Docker Compose, настроить nginx и postgres.</p>]]></description>
+      <category>Разработка и IT</category>
+      <pubDate>Tue, 17 Nov 2026 18:40:00 +0300</pubDate>
+    </item>
+  </channel>
+</rss>

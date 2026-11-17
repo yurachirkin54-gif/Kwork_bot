@@ -1,0 +1,30 @@
+{
+  "data": {
+    "jobs": [
+      {
+        "id": "a1",
+        "title": "Автоматизация отчётов",
+        "url": "https://api.test/jobs/a1",
+        "description": "Нужен скрипт на Python для сборки отчётов в Excel.",
+        "budget": {"from": 3000, "to": 5000, "currency": "RUB"},
+        "proposals_count": 1,
+        "created_at": "2026-11-17T09:00:00Z",
+        "status": "active",
+        "client": {"rating": 4.7, "reviews": 12},
+        "skills": ["Python", "Excel"],
+        "category": "Автоматизация"
+      },
+      {
+        "id": "a2",
+        "title": "Парсер сайта",
+        "description": "Парсинг карточек товаров, выгрузка в CSV.",
+        "budget": {"from": 2500, "to": 2500, "currency": "RUB"},
+        "proposals_count": 0,
+        "created_at": "2026-11-17T08:00:00Z",
+        "status": "closed",
+        "skills": ["Python"],
+        "category": "Парсинг"
+      }
+    ]
+  }
+}

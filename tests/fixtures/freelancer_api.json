@@ -1,0 +1,35 @@
+{
+  "status": "success",
+  "result": {
+    "projects": [
+      {
+        "id": 40822850,
+        "title": "Secure Android APK Audit and Signing",
+        "seo_url": "android/Secure-Android-APK-Audit-Signing",
+        "preview_description": "Hiring: Senior Android Security Specialist",
+        "description": "Project Type: Existing Project. Need a Python/Android security audit, APK signing and reporting.",
+        "budget": {"minimum": 1500.0, "maximum": 12500.0},
+        "currency": {"id": 11, "code": "INR"},
+        "bid_stats": {"bid_count": 16},
+        "time_submitted": 1794929900,
+        "status": "active",
+        "type": "fixed",
+        "jobs": [{"name": "Python"}, {"name": "Android"}]
+      },
+      {
+        "id": 40822851,
+        "title": "Telegram bot for orders",
+        "seo_url": "python/Telegram-bot-for-orders",
+        "preview_description": "Bot",
+        "description": "Need a Telegram bot with aiogram and SQLite, deploy to VPS.",
+        "budget": {"minimum": 0, "maximum": 0},
+        "currency": {"code": "USD"},
+        "bid_stats": {"bid_count": 0},
+        "time_submitted": 1794930000,
+        "status": "active",
+        "type": "hourly",
+        "jobs": [{"name": "Python"}]
+      }
+    ]
+  }
+}

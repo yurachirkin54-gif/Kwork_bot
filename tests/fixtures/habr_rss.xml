@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Хабр Фриланс</title>
+    <link>https://freelance.habr.com</link>
+    <description>Заказы</description>
+    <item>
+      <title>Написать Telegram-бота для приёма заявок</title>
+      <link>https://freelance.habr.com/tasks/604321</link>
+      <guid>https://freelance.habr.com/tasks/604321</guid>
+      <description><![CDATA[Нужен бот на aiogram. Бюджет 6 000 ₽. Много откликов: 2.]]></description>
+      <pubDate>Tue, 17 Nov 2026 12:00:00 +0300</pubDate>
+    </item>
+  </channel>
+</rss>

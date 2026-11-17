@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Niche board</title>
+    <link>https://feed.test</link>
+    <description>Test feed</description>
+    <item>
+      <title>Нужен парсер каталога</title>
+      <link>https://feed.test/jobs/1</link>
+      <guid>feed-1</guid>
+      <description><![CDATA[<p>Нужен парсер на Python. Бюджет: 9 000 ₽. Поступило 3 отклика.</p>]]></description>
+      <pubDate>Tue, 17 Nov 2026 10:00:00 GMT</pubDate>
+      <category>Python</category>
+    </item>
+    <item>
+      <title>Вёрстка лендинга</title>
+      <link>https://feed.test/jobs/2</link>
+      <guid>feed-2</guid>
+      <description><![CDATA[<p>Адаптивная вёрстка по макету Figma.</p>]]></description>
+      <pubDate>Tue, 17 Nov 2026 09:00:00 GMT</pubDate>
+      <category>Вёрстка</category>
+    </item>
+  </channel>
+</rss>

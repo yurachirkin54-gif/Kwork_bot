@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "id": 1665218,
+      "type": "projects",
+      "attributes": {
+        "name": "Нужен бот на Python для заявок",
+        "description": "Требуется Telegram-бот с приёмом заявок и выгрузкой в Google Sheets. Python, aiogram.",
+        "budget": {"amount": 3000, "currency": "UAH"},
+        "published_at": "2026-11-17T17:43:15+02:00",
+        "status": "active",
+        "bid_count": 2,
+        "skills": ["Python", "Боты"]
+      }
+    },
+    {
+      "id": 1665219,
+      "type": "projects",
+      "attributes": {
+        "name": "Парсер маркетплейса",
+        "description": "Сбор цен с маркетплейса, выгрузка в Excel.",
+        "budget": {"amount": 9000, "currency": "UAH"},
+        "published_at": "2026-11-17T16:00:00+02:00",
+        "status": "active",
+        "bid_count": 0,
+        "skills": ["Python", "Парсинг"]
+      }
+    }
+  ]
+}

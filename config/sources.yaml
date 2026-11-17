@@ -1,0 +1,264 @@
+# =============================================================================
+# Source registry. Native adapters ("kind": kwork, fl_ru, ...) carry sane
+# defaults in Python; generic engines ("kind": rss | html | json) are fully
+# described here - any niche marketplace can be added without touching code.
+#
+# Common fields:
+#   enabled          - on/off (also toggled from Telegram /sources)
+#   interval_seconds - polling interval for the light listing request
+#   timeout          - HTTP timeout in seconds
+#   proxy_url        - per-source proxy, e.g. http://user:pass@host:port
+#   use_browser      - Playwright for public JS pages (no captcha bypass)
+#   headers          - extra HTTP headers merged into the default ones
+#   token_env        - env var with an official API token
+#   max_items        - hard cap of jobs handled per scan
+#
+# Verified against live public endpoints on 2026-11-17:
+#   Kwork              - official public RSS https://kwork.ru/rss          OK
+#   FL.ru              - public RSS https://www.fl.ru/rss/all.xml          OK
+#   Freelance.ru       - server-rendered article.task-card catalogue       OK
+#   Freelancehunt      - public RSS https://freelancehunt.com/projects.rss OK
+#   Freelancer.com     - official public REST API                         OK
+#   Remotive/RemoteOK  - open JSON APIs                                   OK
+#   Habr Freelance     - service closed permanently (RSS returns an HTML notice)
+#   Weblancer          - catalogue rendered by JS (use_browser required)
+#   YouDo              - ServicePipe JS challenge + captcha (not bypassed)
+#   Workspace          - anti-bot "Проверка безопасности" page on /tenders/
+# =============================================================================
+
+sources:
+  # ---------------------------------------------------------------------------
+  # 1. Kwork - official public RSS (latest projects) + optional detail fetch
+  # ---------------------------------------------------------------------------
+  - name: kwork
+    kind: kwork
+    enabled: true
+    interval_seconds: 60
+    timeout: 25
+    proxy_url: null
+    use_browser: false
+    max_items: 40
+    category: "Разработка и IT"
+    params:
+      rss_url: "https://kwork.ru/rss"
+      listing_url: "https://kwork.ru/projects?c=41"
+      # Project pages require a logged-in session for most regions,
+      # so phase 2 is opt-in; the RSS already carries title, budget and text.
+      fetch_details: false
+
+  # ---------------------------------------------------------------------------
+  # 2. FL.ru - public RSS (cp1251), budget is embedded in the title
+  # ---------------------------------------------------------------------------
+  - name: fl_ru
+    kind: fl_ru
+    enabled: true
+    interval_seconds: 120
+    timeout: 25
+    max_items: 60
+    category: "Разработка и IT"
+    params:
+      rss_url: "https://www.fl.ru/rss/all.xml"
+      fetch_details: false
+
+  # ---------------------------------------------------------------------------
+  # 3. Freelance.ru - public HTML catalogue (article.task-card)
+  # ---------------------------------------------------------------------------
+  - name: freelance_ru
+    kind: freelance_ru
+    enabled: true
+    interval_seconds: 150
+    timeout: 25
+    max_items: 40
+    category: "Разработка и IT"
+    params:
+      url: "https://freelance.ru/projects/"
+      fetch_details: false
+
+  # ---------------------------------------------------------------------------
+  # 4. Habr Freelance - service closed permanently; kept for completeness.
+  #    The adapter detects the shutdown notice and reports it as blocked.
+  # ---------------------------------------------------------------------------
+  - name: habr_freelance
+    kind: habr_freelance
+    enabled: false
+    interval_seconds: 300
+    timeout: 25
+    max_items: 40
+    notes: "Сервис Хабр Фриланс закрылся навсегда (RSS отдаёт HTML-заглушку)."
+    params:
+      rss_url: "https://freelance.habr.com/tasks.rss"
+      fetch_details: true
+
+  # ---------------------------------------------------------------------------
+  # 5. Freelancehunt - official API v2 with token, public RSS fallback
+  # ---------------------------------------------------------------------------
+  - name: freelancehunt
+    kind: freelancehunt
+    enabled: true
+    interval_seconds: 120
+    timeout: 25
+    token_env: FREELANCEHUNT_TOKEN
+    max_items: 50
+    category: "Разработка и IT"
+    notes: "Токен API: https://freelancehunt.com/my/api (без него работает публичный RSS)."
+    params:
+      api_url: "https://api.freelancehunt.com/v2/projects"
+      fallback_rss: "https://freelancehunt.com/projects.rss"
+
+  # ---------------------------------------------------------------------------
+  # 6. Weblancer - Next.js catalogue, needs a browser for the task list
+  # ---------------------------------------------------------------------------
+  - name: weblancer
+    kind: weblancer
+    enabled: false
+    interval_seconds: 300
+    timeout: 30
+    use_browser: false
+    max_items: 30
+    notes: "Лента отдаётся через JS. Включите use_browser: true и установите playwright."
+    params:
+      url: "https://www.weblancer.net/freelance/"
+      fetch_details: false
+
+  # ---------------------------------------------------------------------------
+  # 7. YouDo - ServicePipe JS challenge; disabled (no bypass)
+  # ---------------------------------------------------------------------------
+  - name: youdo
+    kind: youdo
+    enabled: false
+    interval_seconds: 300
+    timeout: 25
+    max_items: 30
+    notes: "Публичный каталог закрыт JS-антиботом ServicePipe, обход не поддерживается."
+    params:
+      url: "https://youdo.com/tasks-all-opened-all/"
+
+  # ---------------------------------------------------------------------------
+  # 8. Workspace - tender platform behind an anti-bot check
+  # ---------------------------------------------------------------------------
+  - name: workspace
+    kind: workspace
+    enabled: false
+    interval_seconds: 600
+    timeout: 30
+    max_items: 30
+    notes: "Публичная выдача тендеров отдаёт страницу проверки безопасности."
+    params:
+      url: "https://workspace.ru/tenders/"
+
+  # ---------------------------------------------------------------------------
+  # 9. Freelancer.com - official public REST API (no token needed)
+  # ---------------------------------------------------------------------------
+  - name: freelancer_com
+    kind: freelancer_com
+    enabled: true
+    interval_seconds: 120
+    timeout: 30
+    max_items: 40
+    category: "Software Development"
+    params:
+      api_url: "https://www.freelancer.com/api/projects/0.1/projects/active/"
+      query: "python OR bot OR scraper OR automation OR website"
+      limit: 40
+
+  # ---------------------------------------------------------------------------
+  # 10. Remote boards aggregator (Remotive, RemoteOK, WeWorkRemotely RSS)
+  # ---------------------------------------------------------------------------
+  - name: remote_boards
+    kind: remote_boards
+    enabled: true
+    interval_seconds: 300
+    timeout: 30
+    max_items: 50
+    category: "Remote"
+    params:
+      boards:
+        - name: remotive
+          kind: remotive
+          url: "https://remotive.com/api/remote-jobs?category=software-dev&limit=30"
+        - name: remoteok
+          kind: remoteok
+          url: "https://remoteok.com/api"
+          limit: 30
+        - name: weworkremotely
+          kind: rss
+          url: "https://weworkremotely.com/categories/remote-programming-jobs.rss"
+
+  # ---------------------------------------------------------------------------
+  # 11. EXAMPLE: any niche marketplace via RSS (no code required)
+  # ---------------------------------------------------------------------------
+  - name: custom_rss_example
+    kind: rss
+    enabled: false
+    interval_seconds: 300
+    timeout: 20
+    currency: RUB
+    max_items: 30
+    params:
+      url: "https://example.com/jobs.rss"
+    regex:
+      budget: "(?i)(?:бюджет|цена|оплата)[:\\s]*([\\d\\s.,]+)\\s*(?:руб|₽|rub|р\\.)"
+      proposals: "(?i)(\\d+)\\s*(?:отклик|заявк|предложен)"
+
+  # ---------------------------------------------------------------------------
+  # 12. EXAMPLE: any niche marketplace via HTML/CSS selectors
+  # ---------------------------------------------------------------------------
+  - name: custom_html_example
+    kind: html
+    enabled: false
+    interval_seconds: 300
+    timeout: 25
+    currency: RUB
+    max_items: 30
+    headers:
+      Accept-Language: "ru-RU,ru;q=0.9,en;q=0.8"
+    params:
+      url: "https://example.com/projects"
+    selectors:
+      item: "div.project-card"
+      title: "a.project-card__title"
+      url: "a.project-card__title@href"
+      price: "span.project-card__price"
+      proposals: "span.project-card__responses"
+      description: "div.project-card__desc"
+      published_at: "time@datetime"
+      status: "span.project-card__status"
+      client_rating: "span.project-card__rating"
+      skills: "span.project-card__tag"
+    regex:
+      budget: "(?i)([\\d\\s.,]{3,})\\s*(?:руб|₽|rub)"
+      proposals: "(?i)(\\d+)"
+
+  # ---------------------------------------------------------------------------
+  # 13. EXAMPLE: JSON/GraphQL API marketplace
+  # ---------------------------------------------------------------------------
+  - name: custom_json_example
+    kind: json
+    enabled: false
+    interval_seconds: 300
+    timeout: 25
+    currency: USD
+    max_items: 50
+    params:
+      url: "https://api.example.com/v1/jobs"
+      method: GET
+      headers:
+        Accept: "application/json"
+      payload: null
+    mapping:
+      items_path: "data.jobs"
+      external_id: "id"
+      title: "title"
+      url: "url"
+      description: "description"
+      budget_min: "budget.from"
+      budget_max: "budget.to"
+      currency: "budget.currency"
+      proposals: "proposals_count"
+      published_at: "created_at"
+      status: "status"
+      client_rating: "client.rating"
+      client_reviews: "client.reviews"
+      skills: "skills"
+      category: "category"
+      url_template: "https://example.com/jobs/{external_id}"

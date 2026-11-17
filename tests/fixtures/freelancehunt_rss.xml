@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:slash="http://purl.org/rss/1.0/modules/slash/">
+  <channel>
+    <title>Freelancehunt - новые проекты</title>
+    <link>https://freelancehunt.com</link>
+    <description>Проекты</description>
+    <item>
+      <title>Парсер цен с маркетплейса</title>
+      <description><![CDATA[Сбор цен и выгрузка в Excel. Бюджет: 4000 грн]]></description>
+      <pubDate>Tue, 17 Nov 2026 17:00:00 +0200</pubDate>
+      <link>https://freelancehunt.com/project/parser-cen/1665219.html?utm_source=rss</link>
+      <guid>https://freelancehunt.com/project/parser-cen/1665219.html</guid>
+      <slash:comments>4</slash:comments>
+    </item>
+  </channel>
+</rss>
