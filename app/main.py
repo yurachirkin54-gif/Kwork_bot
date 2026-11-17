@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 from loguru import logger
@@ -13,12 +14,15 @@ from app.config import ConfigError, ConfigManager, EnvSettings, get_env
 from app.core.currency import CurrencyConverter
 from app.core.engine import Engine, ScanReport
 from app.processing.llm_analyzer import LLMAnalyzer
+from app.sources.browser_client import BrowserClient
+from app.sources.http_client import HttpClient
 from app.storage.database import Database
 from app.storage.repository import Repository
 from app.telegram.bot import AppContext, create_bot, create_dispatcher
 from app.telegram.notifier import Notifier, source_label
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+HEARTBEAT_PATH = BASE_DIR / "data" / ".heartbeat"
 SETUP_HINT = (
     "Не настроен Telegram-бот.\n\n"
     "1) Скопируйте .env.example в .env\n"
@@ -57,24 +61,27 @@ def configure_logging(level: str) -> None:
         "<cyan>{name}</cyan> - <level>{message}</level>",
     )
     logs_dir = BASE_DIR / "logs"
-    logs_dir.mkdir(exist_ok=True)
-    logger.add(
-        logs_dir / "bot.log",
-        level=level,
-        rotation="10 MB",
-        retention=14,
-        encoding="utf-8",
-        enqueue=True,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-    )
-    logger.add(
-        logs_dir / "errors.log",
-        level="ERROR",
-        rotation="10 MB",
-        retention=30,
-        encoding="utf-8",
-        enqueue=True,
-    )
+    try:
+        logs_dir.mkdir(exist_ok=True)
+        logger.add(
+            logs_dir / "bot.log",
+            level=level,
+            rotation="10 MB",
+            retention=14,
+            encoding="utf-8",
+            enqueue=True,
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        )
+        logger.add(
+            logs_dir / "errors.log",
+            level="ERROR",
+            rotation="10 MB",
+            retention=30,
+            encoding="utf-8",
+            enqueue=True,
+        )
+    except OSError as exc:
+        logger.warning(f"Файловое логирование отключено ({logs_dir}): {exc}")
 
 
 class Services:
@@ -133,20 +140,27 @@ async def create_services(args: argparse.Namespace) -> Services:
     if not args.dry_run and not args.no_bot and env.telegram_bot_token:
         bot = create_bot(env.telegram_bot_token)
 
+    proxy = env.http_proxy or None
+    http = HttpClient(proxy=proxy)
+    browser = BrowserClient(proxy=proxy)
     engine = Engine(
         config,
         repo,
         converter,
         notifier=None,
         llm=llm,
+        http=http,
+        browser=browser,
         dry_run=args.dry_run,
         chat_ids=env.allowed_ids,
+        timezone=env.timezone,
     )
     notifier = Notifier(
         bot,
         repo,
         engine.filters,
         chat_ids=env.allowed_ids,
+        admin_ids=env.admin_ids_set,
         throttle_seconds=config.app.engine.notify_throttle_seconds,
     )
     engine.notifier = notifier
@@ -207,9 +221,18 @@ async def run_once(args: argparse.Namespace) -> int:
         await services.close()
 
 
+def _touch_heartbeat() -> None:
+    try:
+        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_PATH.write_text(str(int(time.time())), encoding="utf-8")
+    except OSError:
+        pass
+
+
 async def _live_loop(engine: Engine) -> None:
     while True:
         await asyncio.sleep(60)
+        _touch_heartbeat()
         try:
             await engine.live_updates_once()
         except asyncio.CancelledError:
@@ -255,15 +278,15 @@ async def run_service(args: argparse.Namespace) -> int:
             try:
                 me = await bot.get_me()
                 logger.info(f"Telegram-бот запущен: @{me.username}")
-            except Exception as exc:
-                logger.error(f"Не удалось авторизоваться в Telegram: {exc}")
-            await bot.delete_webhook(drop_pending_updates=False)
-            tasks.append(
-                asyncio.create_task(
-                    dispatcher.start_polling(bot, handle_signals=False, close_bot_session=False),
-                    name="polling",
+                await bot.delete_webhook(drop_pending_updates=False)
+                tasks.append(
+                    asyncio.create_task(
+                        dispatcher.start_polling(bot, handle_signals=False, close_bot_session=False),
+                        name="polling",
+                    )
                 )
-            )
+            except Exception as exc:
+                logger.error(f"Не удалось запустить Telegram-бота (проверьте TELEGRAM_BOT_TOKEN): {exc}")
         else:
             logger.info("Telegram-бот не запущен (--no-bot или нет токена): работает только движок")
         logger.info(
@@ -271,6 +294,7 @@ async def run_service(args: argparse.Namespace) -> int:
             len(engine.adapters),
             sum(1 for adapter in engine.adapters if adapter.config.enabled),
         )
+        _touch_heartbeat()
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         pass

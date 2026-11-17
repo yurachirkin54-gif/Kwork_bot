@@ -14,15 +14,30 @@ from loguru import logger
 
 from app.config import SourceConfig
 from app.core.currency import CurrencyConverter
-from app.models import JobStatus, UnifiedJob, as_utc, utcnow
+from app.models import JobStatus, UnifiedJob, as_utc, resolve_timezone, utcnow
 from app.sources.browser_client import BrowserClient, BrowserFetchError, BrowserUnavailable
 from app.sources.http_client import FetchResult, HttpClient, HttpError
 
 ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
 SPACE_RE = re.compile(r"\s+")
 RELATIVE_RE = re.compile(
-    r"(\d+)\s*(минут|мин|час|ч\.|день|дня|дней|дн\.|недел|месяц|мес\.?)\s*(?:назад|тому назад)?",
+    r"(\d+)\s*(минут\w*|мин\.?|час\w*|ч\.?|д(?:ень|ня|ней|н\.?)|недел\w*|месяц\w*|мес\.?)",
     re.IGNORECASE,
+)
+RU_DOTTED_DATE_RE = re.compile(r"^\s*\d{1,2}\.\d{1,2}\.\d{2,4}")
+RU_MONTHS: tuple[tuple[str, str], ...] = (
+    (r"январ[ья]|янв\.?", "January"),
+    (r"феврал[ья]|фев\.?", "February"),
+    (r"март[а]?|мар\.?", "March"),
+    (r"апрел[ья]|апр\.?", "April"),
+    (r"ма[йя]", "May"),
+    (r"июн[ья]", "June"),
+    (r"июл[ья]", "July"),
+    (r"август[а]?|авг\.?", "August"),
+    (r"сентябр[ья]|сен\.?", "September"),
+    (r"октябр[ья]|окт\.?", "October"),
+    (r"ноябр[ья]|нояб?\.?", "November"),
+    (r"декабр[ья]|дек\.?", "December"),
 )
 
 BLOCK_MARKERS = (
@@ -321,10 +336,14 @@ class BaseSourceAdapter(ABC):
         return SPACE_RE.sub(" ", text).strip()
 
     @staticmethod
-    def parse_datetime(value: Any, *, default: datetime | None = None) -> datetime | None:
+    def parse_datetime(
+        value: Any, *, default: datetime | None = None, tz_name: str | None = None
+    ) -> datetime | None:
         if value is None:
             return default
         if isinstance(value, datetime):
+            if value.tzinfo is None and tz_name:
+                return value.replace(tzinfo=resolve_timezone(tz_name)).astimezone(timezone.utc)
             return as_utc(value)
         if isinstance(value, (int, float)):
             try:
@@ -342,10 +361,16 @@ class BaseSourceAdapter(ABC):
         relative = BaseSourceAdapter.parse_relative_datetime(text)
         if relative is not None:
             return relative
+        normalized = re.sub(r"\s+в\s+", " ", text, flags=re.IGNORECASE)
+        for pattern, replacement in RU_MONTHS:
+            normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+        dayfirst = bool(RU_DOTTED_DATE_RE.match(normalized))
         try:
-            parsed = date_parser.parse(text, fuzzy=True)
+            parsed = date_parser.parse(normalized, fuzzy=True, dayfirst=dayfirst)
         except (ValueError, OverflowError, TypeError):
             return default
+        if parsed.tzinfo is None and tz_name:
+            return parsed.replace(tzinfo=resolve_timezone(tz_name)).astimezone(timezone.utc)
         return as_utc(parsed)
 
     @staticmethod
@@ -356,28 +381,32 @@ class BaseSourceAdapter(ABC):
         lowered = text.strip().lower()
         if not lowered:
             return None
-        if "только что" in lowered or "just now" in lowered:
+        if "только что" in lowered or "just now" in lowered or "меньше минуты" in lowered:
             return reference
+        if "полчаса" in lowered:
+            return reference - timedelta(minutes=30)
         if "вчера" in lowered or "yesterday" in lowered:
             return reference - timedelta(days=1)
         if "сегодня" in lowered or "today" in lowered:
             return reference - timedelta(hours=1)
-        match = RELATIVE_RE.search(lowered)
-        if not match:
+        matches = list(RELATIVE_RE.finditer(lowered))
+        if not matches:
             return None
-        amount = int(match.group(1))
-        unit = match.group(2)
-        if unit.startswith(("минут", "мин")):
-            delta = timedelta(minutes=amount)
-        elif unit.startswith(("час", "ч")):
-            delta = timedelta(hours=amount)
-        elif unit.startswith(("недел",)):
-            delta = timedelta(weeks=amount)
-        elif unit.startswith(("месяц", "мес")):
-            delta = timedelta(days=30 * amount)
-        else:
-            delta = timedelta(days=amount)
-        return reference - delta
+        total_delta = timedelta()
+        for match in matches:
+            amount = int(match.group(1))
+            unit = match.group(2)
+            if unit.startswith(("минут", "мин")):
+                total_delta += timedelta(minutes=amount)
+            elif unit.startswith(("час", "ч")):
+                total_delta += timedelta(hours=amount)
+            elif unit.startswith("недел"):
+                total_delta += timedelta(weeks=amount)
+            elif unit.startswith(("месяц", "мес")):
+                total_delta += timedelta(days=30 * amount)
+            else:
+                total_delta += timedelta(days=amount)
+        return reference - total_delta
 
     @staticmethod
     def extract_status(text: str | None, default: JobStatus = "open") -> JobStatus:
@@ -393,23 +422,31 @@ class BaseSourceAdapter(ABC):
     def extract_proposals(text: str | None, pattern: str | None = None) -> int | None:
         if not text:
             return None
+        raw_text = str(text)
         if pattern:
-            match = re.search(pattern, str(text), re.IGNORECASE)
+            match = re.search(pattern, raw_text, re.IGNORECASE)
             if match:
                 groups = [g for g in match.groups() if g and str(g).isdigit()]
                 if groups:
                     return int(groups[0])
+        if re.search(
+            r"(?:нет\s+(?:ответов|откликов|предложений|заявок)|без\s+(?:ответов|откликов)|"
+            r"(?:откликов|ответов|предложений)\s+нет|no\s+(?:bids|proposals|responses))",
+            raw_text,
+            re.IGNORECASE,
+        ):
+            return 0
         match = re.search(
-            r"(\d+)\s*(?:отклик|отзыва|заявк|предложен|bid|proposal|response)",
-            str(text),
+            r"(?<!\d)(\d+)(?![.,:/-]\d)\s*(?:отклик\w*|заяв\w*|предложен\w*|ответ\w*|bids?|proposals?|responses?)",
+            raw_text,
             re.IGNORECASE,
         )
         if match:
             return int(match.group(1))
-        # Reversed wording: "Откликов: 3", "Заявок — 5"
+        # Reversed wording: "Откликов: 3", "Заявок — 5" (never match dates like "заявок: 27.11.2026")
         match = re.search(
-            r"(?:отклик\w*|заяв\w*|предложен\w*|bids?|proposals?|responses?)\s*[:\-—]?\s*(\d+)",
-            str(text),
+            r"(?<!приема\s)(?:отклик\w*|заяв\w*|предложен\w*|ответ\w*|bids?|proposals?|responses?)\s*[:\-—]?\s*(\d+)(?![.,:/-]\d)",
+            raw_text,
             re.IGNORECASE,
         )
         if match:

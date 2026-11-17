@@ -113,8 +113,16 @@ class LLMConfig(BaseModel):
     base_weight: float = 0.65
 
     @property
+    def is_local_endpoint(self) -> bool:
+        lowered = (self.base_url or "").lower()
+        return any(
+            host in lowered
+            for host in ("localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal", "ollama")
+        )
+
+    @property
     def available(self) -> bool:
-        return bool(self.enabled and self.api_key)
+        return bool(self.enabled and (self.api_key or self.is_local_endpoint))
 
 
 class EngineConfig(BaseModel):

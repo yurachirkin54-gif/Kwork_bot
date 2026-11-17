@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -28,6 +29,24 @@ def as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def resolve_timezone(tz_name: str | None) -> tzinfo:
+    """Resolve an IANA timezone name with a safe UTC fallback."""
+
+    if not tz_name:
+        return timezone.utc
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def local_now(tz_name: str | None = None, now: datetime | None = None) -> datetime:
+    """Current time converted to the configured local timezone."""
+
+    reference = as_utc(now) or utcnow()
+    return reference.astimezone(resolve_timezone(tz_name))
 
 
 class LLMAnalysis(BaseModel):
@@ -236,10 +255,15 @@ class QuietHours(BaseModel):
         hour, minute = (int(part) for part in value.split(":"))
         return time(hour=hour, minute=minute)
 
-    def is_active(self, now: datetime | None = None) -> bool:
+    def is_active(self, now: datetime | None = None, tz_name: str | None = None) -> bool:
         if not self.enabled:
             return False
-        reference = now or utcnow()
+        if now is not None and now.tzinfo is not None and not tz_name:
+            reference = now
+        elif tz_name:
+            reference = local_now(tz_name, now=now)
+        else:
+            reference = now or utcnow()
         start = self._parse(self.start)
         end = self._parse(self.end)
         current = reference.timetz().replace(tzinfo=None)

@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from loguru import logger
 
 from app.models import (
+    LLMAnalysis,
     ScoringResult,
     ScoreComponents,
     UnifiedJob,
@@ -21,6 +22,7 @@ from app.models import (
     priority_for,
     utcnow,
 )
+from app.processing.scorer import readiness_label
 from app.storage.orm import Job, Notification
 from app.storage.repository import Repository
 from app.telegram.keyboards import job_keyboard
@@ -38,6 +40,7 @@ SOURCE_LABELS = {
     "weblancer": "Weblancer",
     "youdo": "YouDo",
     "workspace": "Workspace",
+    "kadrof": "Kadrof",
     "remote_boards": "Remote Boards",
 }
 
@@ -151,6 +154,8 @@ def format_job_card(
         if analysis.red_flags:
             flags_line = "🚩 " + escape("; ".join(analysis.red_flags[:4]))[:300]
         summary = analysis.summary_ru.strip()
+    elif job.description.strip():
+        llm_line = f"⚙️ Сложность (оценка): {escape(readiness_label(job))}"
 
     description = (summary or job.description or "").strip()
     if description:
@@ -170,7 +175,7 @@ def format_job_card(
         if flags_line:
             body.append(flags_line)
         if cross_posts:
-            unique = list(dict.fromkeys(str(item) for item in cross_posts if item))[:3]
+            unique = list(dict.fromkeys(source_label(str(item)) for item in cross_posts if item))[:3]
             if unique:
                 body.append("🔁 Также найдено на: " + escape(", ".join(unique)))
         if stale_reason:
@@ -211,6 +216,15 @@ def format_digest(jobs: list[Job]) -> str:
 
 def scoring_from_row(row: Job) -> ScoringResult:
     components = ScoreComponents(**(row.score_components or {}))
+    llm_obj = None
+    if row.summary_ru and row.llm_score is not None:
+        llm_obj = LLMAnalysis(
+            easiness_score=max(1, min(10, round((row.llm_score or 50.0) / 10))),
+            price_fairness_score=max(1, min(10, round((row.llm_score or 50.0) / 10))),
+            clarity_score=max(1, min(10, round((row.llm_score or 50.0) / 10))),
+            summary_ru=row.summary_ru,
+            draft_proposal=row.draft_proposal or "",
+        )
     return ScoringResult(
         base_score=row.base_score or row.score or 0.0,
         llm_score=row.llm_score,
@@ -218,6 +232,7 @@ def scoring_from_row(row: Job) -> ScoringResult:
         components=components,
         reasons=list(row.score_reasons or []),
         priority=priority_for(row.score or 0.0),
+        llm=llm_obj,
     )
 
 
@@ -231,12 +246,14 @@ class Notifier:
         filters_provider: Callable[[], UserFilters],
         *,
         chat_ids: set[int] | None = None,
+        admin_ids: set[int] | None = None,
         throttle_seconds: float = 1.2,
     ) -> None:
         self.bot = bot
         self.repo = repository
         self.filters_provider = filters_provider
         self.chat_ids = chat_ids or set()
+        self.admin_ids = admin_ids or self.chat_ids
         self.throttle_seconds = max(0.0, throttle_seconds)
         self._queue: asyncio.Queue[tuple[UnifiedJob, ScoringResult, int | None, set[int]]] = asyncio.Queue()
         self._worker_task: asyncio.Task | None = None
@@ -346,10 +363,11 @@ class Notifier:
             self._sent_counter += 1
 
     async def send_health_alert(self, text: str) -> None:
-        if self.bot is None or not self.chat_ids:
+        targets = self.admin_ids or self.chat_ids
+        if self.bot is None or not targets:
             logger.warning(f"Health-алерт (не отправлен): {text}")
             return
-        for chat_id in self.chat_ids:
+        for chat_id in targets:
             try:
                 await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
             except Exception as exc:  # pragma: no cover - network
@@ -369,10 +387,22 @@ class Notifier:
                 notification = await self.repo.mark_notified(row.id, chat_id, message.message_id, row.score or 0)
                 await self.repo.advance_notification(notification.id, 99)
 
-    async def mark_stale(self, notification: Notification, row: Job, reason: str) -> None:
+    async def refresh_card(
+        self,
+        notification: Notification,
+        row: Job,
+        *,
+        stale_reason: str | None = None,
+        cross_posts: Iterable[str] | None = None,
+    ) -> None:
         if self.bot is None or not notification.message_id:
             return
-        text = format_job_card(row.to_unified(), scoring_from_row(row), stale_reason=reason)
+        text = format_job_card(
+            row.to_unified(),
+            scoring_from_row(row),
+            stale_reason=stale_reason,
+            cross_posts=cross_posts,
+        )
         try:
             await self.bot.edit_message_text(
                 chat_id=notification.chat_id,
@@ -387,6 +417,15 @@ class Notifier:
             await asyncio.sleep(exc.retry_after + 1)
         except Exception as exc:  # pragma: no cover - network
             logger.debug(f"Live-обновление упало: {exc}")
+
+    async def mark_stale(
+        self,
+        notification: Notification,
+        row: Job,
+        reason: str,
+        cross_posts: Iterable[str] | None = None,
+    ) -> None:
+        await self.refresh_card(notification, row, stale_reason=reason, cross_posts=cross_posts)
 
     async def send_text(self, chat_id: int, text: str, markup: Any = None) -> bool:
         if self.bot is None:

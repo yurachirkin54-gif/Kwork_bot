@@ -103,23 +103,48 @@ class FreelanceRuAdapter(BaseSourceAdapter):
         return self.parse_datetime(card.select_one(".task-card__foot-item").get_text(" ", strip=True) if card.select_one(".task-card__foot-item") else None)
 
     async def fetch_details(self, job: UnifiedJob) -> UnifiedJob:
-        if not self.fetch_details_enabled or not job.url:
+        if not job.url:
             return job
         try:
             soup, _ = await self.get_soup(job.url)
         except SourceError as exc:
             logger.debug(f"freelance.ru: детальная страница недоступна ({exc})")
             return job
-        body = soup.select_one(".task-view__description, .task__description, article")
-        if body is not None:
-            text = self.clean_html(body.get_text(" ", strip=True))
+
+        hero = soup.select_one(".tv-hero")
+        if hero is not None:
+            from bs4 import BeautifulSoup
+
+            hero_copy = BeautifulSoup(str(hero), "lxml")
+            for junk in hero_copy.select(".tv-hero__top, .tv-hero__meta, h1"):
+                junk.decompose()
+            text = self.clean_html(hero_copy.get_text(" ", strip=True))
             if len(text) > len(job.description):
                 job.description = text[:12000]
-        job.proposals_count = self.extract_proposals(soup.get_text(" ", strip=True)) or job.proposals_count
+        else:
+            body = soup.select_one(".task-view__description, .task__description, article")
+            if body is not None:
+                text = self.clean_html(body.get_text(" ", strip=True))
+                if len(text) > len(job.description):
+                    job.description = text[:12000]
+
+        rail = soup.select_one(".tv-rail")
+        if rail is not None:
+            rail_text = rail.get_text(" ", strip=True)
+            rev_match = re.search(r"(\d+)\s*отзыв", rail_text, re.IGNORECASE)
+            if rev_match:
+                job.client_reviews = int(rev_match.group(1))
+
+        page_text = soup.get_text(" ", strip=True)
+        proposals = self.extract_proposals(page_text)
+        if proposals is not None:
+            job.proposals_count = proposals
+        if re.search(r"(?:задание\s+закрыто|исполнитель\s+выбран|завершено)", page_text, re.IGNORECASE):
+            job.status = "closed"
         return job
 
     def needs_details(self, job: UnifiedJob) -> bool:
-        return self.fetch_details_enabled and bool(job.url)
+        return self.fetch_details_enabled and bool(job.url) and not job.description.strip()
 
     @staticmethod
     def _external_id(url: str) -> str:

@@ -17,6 +17,8 @@ class HardFilter:
         self.filters = filters
         self._include_regex = _compile(filters.include_regex)
         self._exclude_regex = _compile(filters.exclude_regex)
+        self._include_kw_patterns = _compile_keywords(filters.include_keywords, allow_inflection=True)
+        self._exclude_kw_patterns = _compile_keywords(filters.exclude_keywords, allow_inflection=True)
 
     def check(self, job: UnifiedJob, now: datetime | None = None) -> FilterDecision:
         reference = now or utcnow()
@@ -46,16 +48,15 @@ class HardFilter:
             return budget_decision
 
         text = job.text_blob()
-        for keyword in filters.exclude_keywords:
-            if keyword and keyword.lower() in text:
+        for keyword, pattern in self._exclude_kw_patterns:
+            if pattern.search(text):
                 return FilterDecision(passed=False, reason=f"стоп-слово: {keyword}")
         for pattern in self._exclude_regex:
             if pattern.search(text):
                 return FilterDecision(passed=False, reason=f"стоп-regex: {pattern.pattern}")
 
-        includes = [k.lower() for k in filters.include_keywords if k]
-        if includes or self._include_regex:
-            keyword_hit = any(keyword in text for keyword in includes) if includes else False
+        if self._include_kw_patterns or self._include_regex:
+            keyword_hit = any(pattern.search(text) for _kw, pattern in self._include_kw_patterns)
             regex_hit = any(pattern.search(text) for pattern in self._include_regex)
             if not keyword_hit and not regex_hit:
                 return FilterDecision(passed=False, reason="нет ни одного ключевого слова из include")
@@ -103,4 +104,39 @@ def _compile(patterns: list[str]) -> list[re.Pattern[str]]:
             compiled.append(re.compile(raw, re.IGNORECASE | re.UNICODE))
         except re.error:
             continue
+    return compiled
+
+
+def _compile_keywords(keywords: list[str], *, allow_inflection: bool = True) -> list[tuple[str, re.Pattern[str]]]:
+    """Compile word-boundary aware patterns so e.g. 'ставки' never blocks 'доставки'."""
+
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    for raw in keywords:
+        kw = str(raw or "").strip().lower()
+        if not kw:
+            continue
+        has_wildcard = "*" in kw
+        if has_wildcard:
+            parts = [r"\s+".join(re.escape(w) for w in seg.split()) for seg in kw.split("*")]
+            expr = r"\w*".join(parts)
+            if kw[0].isalnum() or kw[0] == "_":
+                expr = rf"(?<!\w){expr}"
+            if kw[-1].isalnum() or kw[-1] == "_":
+                expr = rf"{expr}(?!\w)"
+        else:
+            tokens = kw.split()
+            expr = r"\s+".join(re.escape(tok) for tok in tokens)
+            if kw[0].isalnum() or kw[0] == "_":
+                expr = rf"(?<!\w){expr}"
+            if kw[-1].isalnum() or kw[-1] == "_":
+                if allow_inflection and len(tokens) == 1:
+                    if len(kw) <= 3:
+                        expr = rf"{expr}(?:[аыуеио]|ов|ам|ами|ах|ом|s|es)?(?!\w)"
+                    elif len(kw) <= 5:
+                        expr = rf"{expr}\w{{0,3}}(?!\w)"
+                    else:
+                        expr = rf"{expr}\w{{0,4}}(?!\w)"
+                else:
+                    expr = rf"{expr}(?!\w)"
+        compiled.append((raw, re.compile(expr, re.IGNORECASE | re.UNICODE)))
     return compiled

@@ -6,12 +6,11 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
-from loguru import logger
 
 from app.processing.llm_analyzer import template_proposal
 from app.telegram.bot import AppContext
-from app.telegram.handlers import reply_long, safe_edit
-from app.telegram.keyboards import dislike_keyboard, job_keyboard
+from app.telegram.handlers import esc, reply_long
+from app.telegram.keyboards import cancel_keyboard, dislike_keyboard, job_keyboard, proposal_keyboard
 from app.telegram.notifier import format_job_card, scoring_from_row, source_label
 
 router = Router(name="job_actions")
@@ -30,8 +29,7 @@ def _job_id(data: str | None) -> int | None:
         return None
 
 
-@router.callback_query(F.data.startswith("job:proposal:"))
-async def cb_proposal(callback: CallbackQuery, ctx: AppContext) -> None:
+async def _send_proposal(callback: CallbackQuery, ctx: AppContext, *, regenerate: bool = False) -> None:
     job_id = _job_id(callback.data)
     if job_id is None:
         await callback.answer("Некорректная кнопка", show_alert=True)
@@ -41,19 +39,42 @@ async def cb_proposal(callback: CallbackQuery, ctx: AppContext) -> None:
         await callback.answer("Заказ не найден", show_alert=True)
         return
     await callback.answer("Готовлю отклик...")
+
     unified = row.to_unified()
-    draft = await ctx.llm.draft_proposal(unified)
-    origin = "AI" if draft else "шаблон"
-    if not draft:
-        draft = template_proposal(unified)
-    await ctx.repo.set_draft_proposal(job_id, draft)
+    draft: str | None = None
+    origin = "шаблон"
+    if not regenerate and row.draft_proposal and row.draft_proposal.strip():
+        draft = row.draft_proposal.strip()
+        origin = "AI (сохранённый)" if ctx.llm.enabled or row.llm_score is not None else "шаблон"
+    else:
+        draft = await ctx.llm.draft_proposal(unified)
+        if draft:
+            origin = "AI"
+        else:
+            draft = template_proposal(unified)
+        await ctx.repo.set_draft_proposal(job_id, draft)
+
     text = (
-        f"✍️ <b>Черновик отклика</b> ({origin}) - {source_label(row.source)}\n"
-        f"<b>{row.title[:160]}</b>\n\n{draft}\n\n"
-        f"🔗 {row.url}"
+        f"✍️ <b>Черновик отклика</b> ({esc(origin)}) - {esc(source_label(row.source))}\n"
+        f"<b>{esc(row.title[:160])}</b>\n\n{esc(draft)}\n\n"
+        f"🔗 {esc(row.url)}"
     )
     if isinstance(callback.message, Message):
-        await reply_long(callback.message, text)
+        await reply_long(
+            callback.message,
+            text,
+            markup=proposal_keyboard(job_id, llm_enabled=ctx.llm.enabled),
+        )
+
+
+@router.callback_query(F.data.startswith("job:proposal:"))
+async def cb_proposal(callback: CallbackQuery, ctx: AppContext) -> None:
+    await _send_proposal(callback, ctx, regenerate=False)
+
+
+@router.callback_query(F.data.startswith("job:proposal_regen:"))
+async def cb_proposal_regen(callback: CallbackQuery, ctx: AppContext) -> None:
+    await _send_proposal(callback, ctx, regenerate=True)
 
 
 @router.callback_query(F.data.startswith("job:refresh:"))
@@ -67,7 +88,15 @@ async def cb_refresh(callback: CallbackQuery, ctx: AppContext) -> None:
     if row is None:
         await callback.answer(message, show_alert=True)
         return
-    text = format_job_card(row.to_unified(), scoring_from_row(row))
+    posts = await ctx.repo.cross_posts_for(row.id)
+    notification = await ctx.repo.notification_for_job(row.id)
+    stale_reason = notification.stale_reason if notification and notification.status == "stale" else None
+    text = format_job_card(
+        row.to_unified(),
+        scoring_from_row(row),
+        stale_reason=stale_reason,
+        cross_posts=[p.source for p in posts],
+    )
     if isinstance(callback.message, Message):
         try:
             await callback.message.edit_text(
@@ -75,9 +104,9 @@ async def cb_refresh(callback: CallbackQuery, ctx: AppContext) -> None:
                 parse_mode="HTML",
                 reply_markup=job_keyboard(row.id, row.url),
             )
-        except Exception:  # pragma: no cover - message too old
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=job_keyboard(row.id, row.url))
-        await callback.message.answer(f"🔄 {message}")
+        except Exception:  # pragma: no cover - message unchanged or too old
+            pass
+        await callback.message.answer(f"🔄 {esc(message)}", parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("job:like:"))
@@ -146,12 +175,14 @@ async def cb_stopword(callback: CallbackQuery, ctx: AppContext, state: FSMContex
     await state.set_state(FeedbackInput.waiting_stopword)
     await state.update_data(job_id=job_id)
     await callback.answer()
-    hint = f"\nЗаголовок: {row.title[:120]}" if row else ""
+    hint = f"\nЗаголовок: {esc(row.title[:120])}" if row else ""
     if isinstance(callback.message, Message):
         await callback.message.answer(
             "Отправьте слово или фразу, которую нужно добавить в стоп-лист."
             + hint
             + "\n\nМожно несколько через запятую.",
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
         )
 
 
@@ -159,7 +190,7 @@ async def cb_stopword(callback: CallbackQuery, ctx: AppContext, state: FSMContex
 async def process_stopword(message: Message, ctx: AppContext, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw:
-        await message.answer("Пустая фраза. Отправьте слово или нажмите /filters для отмены.")
+        await message.answer("Пустая фраза. Отправьте слово или нажмите «Отмена».")
         return
     values = [chunk.strip() for chunk in raw.split(",") if chunk.strip()]
     filters = ctx.engine.filters()
@@ -171,7 +202,8 @@ async def process_stopword(message: Message, ctx: AppContext, state: FSMContext)
         await ctx.repo.set_job_hidden(job_id, True)
     await state.clear()
     await message.answer(
-        f"⛔ Добавлено в стоп-лист: {', '.join(values)}\nВсего стоп-слов: {len(merged)}"
+        f"⛔ Добавлено в стоп-лист: {esc(', '.join(values))}\nВсего стоп-слов: {len(merged)}",
+        parse_mode="HTML",
     )
 
 

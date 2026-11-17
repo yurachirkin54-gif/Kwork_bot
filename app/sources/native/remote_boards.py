@@ -45,6 +45,10 @@ class RemoteBoardsAdapter(BaseSourceAdapter):
             if errors:
                 raise errors[0]
             raise SourceParseError("Ни одна remote-лента не вернула заказов", source=self.name)
+        jobs.sort(
+            key=lambda job: job.published_at.timestamp() if job.published_at is not None else 0.0,
+            reverse=True,
+        )
         return await self.finalize(jobs)
 
     async def _fetch_board(self, board: dict) -> list[UnifiedJob]:

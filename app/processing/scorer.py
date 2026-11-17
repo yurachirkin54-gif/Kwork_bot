@@ -20,38 +20,88 @@ from app.models import (
 RED_FLAGS: list[tuple[str, str]] = [
     (r"бесплатн|без оплаты|безвозмездно", "работа без оплаты"),
     (r"за отзыв|за отзывы|взамен на отзыв", "оплата отзывом"),
+    (r"за процент от продаж|за % от продаж|только процент", "оплата процентом"),
     (r"тестовое задание бесплатно|бесплатное тестовое", "бесплатное тестовое"),
     (r"оплата после|оплачу после|по факту сдачи", "оплата после сдачи"),
     (r"срочно на вчера|нужно вчера|дедлайн вчера", "невозможный дедлайн"),
     (r"сделать всё под ключ за|под ключ за \d{3,4}\s*(?:р|руб)", "демпинг «под ключ»"),
 ]
 
-EASY_SIGNALS = [
-    "\u043f\u0430\u0440\u0441\u0435\u0440",  # парсер
-    "\u0431\u043e\u0442",  # бот
+CODE_SIGNALS = (
+    "парсер",
+    "бот",
+    "чат-бот",
     "python",
     "api",
-    "\u0441\u043a\u0440\u0438\u043f\u0442",  # скрипт
-    "\u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0437",  # автоматизир
-    "\u0448\u0430\u0431\u043b\u043e\u043d",  # шаблон
-    "\u043b\u0435\u043d\u0434\u0438\u043d\u0433",  # лендинг
+    "скрипт",
+    "автоматизац",
+    "сайт",
+    "лендинг",
+    "доработ",
+    "правк",
+    "проверк",
+    "тестир",
+    "аудит",
+    "баг",
+    "верстк",
+    "вёрстк",
     "wordpress",
+    "tilda",
+    "тильд",
+    "n8n",
     "telegram",
-    "\u0442\u0437",  # ТЗ
-    "\u0442\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0437\u0430\u0434\u0430\u043d\u0438\u0435",  # техническое задание
-    "\u0442\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438",  # требовани
-]
+    "телеграм",
+)
+
+AI_CREATIVE_SIGNALS = (
+    "логотип",
+    "лого",
+    "баннер",
+    "обложк",
+    "инфографик",
+    "иллюстрац",
+    "превью",
+    "презентац",
+    "креатив",
+    "видеоролик",
+    "видео",
+    "ролик",
+    "reels",
+    "рилс",
+    "shorts",
+    "анимац",
+    "интро",
+    "veo",
+    "нейросет",
+    "gpt",
+    "ии",
+)
+
+EASY_SIGNALS = [*CODE_SIGNALS, *AI_CREATIVE_SIGNALS, "шаблон", "тз", "техническое задание", "требовани"]
 
 CLARITY_SIGNALS = [
-    "\u0442\u0437",
-    "\u0442\u0440\u0435\u0431\u043e\u0432\u0430\u043d",
-    "\u0444\u0443\u043d\u043a\u0446\u0438\u043e\u043d\u0430\u043b",
-    "\u0441\u0442\u0435\u043a",
-    "\u0441\u0440\u043e\u043a",
-    "\u0431\u044e\u0434\u0436\u0435\u0442",
+    "тз",
+    "требован",
+    "функционал",
+    "стек",
+    "срок",
+    "бюджет",
     "api",
-    "\u0441\u0446\u0435\u043d\u0430\u0440\u0438",
+    "сценари",
 ]
+
+
+def _compile_signal(sig: str) -> re.Pattern[str]:
+    esc = re.escape(sig)
+    if len(sig) <= 3:
+        return re.compile(rf"(?<!\w){esc}(?:[аыуеио]|ов|ам|ами|ах|ом|s|es)?(?!\w)", re.IGNORECASE | re.UNICODE)
+    return re.compile(rf"(?<!\w){esc}", re.IGNORECASE | re.UNICODE)
+
+
+_CODE_PATTERNS = [_compile_signal(s) for s in CODE_SIGNALS]
+_CREATIVE_PATTERNS = [_compile_signal(s) for s in AI_CREATIVE_SIGNALS]
+_EASY_PATTERNS = [_compile_signal(s) for s in EASY_SIGNALS]
+_CLARITY_PATTERNS = [_compile_signal(s) for s in CLARITY_SIGNALS]
 
 
 class JobScorer:
@@ -196,12 +246,15 @@ class JobScorer:
         elif length < 40:
             score -= 0.18
 
-        lowered = description.lower()
-        easy_hits = sum(1 for signal in EASY_SIGNALS if signal in lowered)
-        score += min(0.16, easy_hits * 0.05)
+        lowered = job.text_blob()
+        easy_hits = sum(1 for pat in _EASY_PATTERNS if pat.search(lowered))
+        score += min(0.25, easy_hits * 0.06)
 
-        clarity_hits = sum(1 for signal in CLARITY_SIGNALS if signal in lowered)
+        clarity_hits = sum(1 for pat in _CLARITY_PATTERNS if pat.search(lowered))
         score += min(0.12, clarity_hits * 0.03)
+
+        if any(heavy in lowered for heavy in HARD_SIGNALS):
+            score -= 0.15
 
         if re.search(r"(\n\s*[-*\u2022]|\d+\.)", description):
             score += 0.04
@@ -232,25 +285,43 @@ class JobScorer:
             reasons.append("заказчик с подтверждённой оплатой")
         if job.client_rating and job.client_rating >= 4.5:
             reasons.append(f"рейтинг заказчика {job.client_rating:g}")
+        blob = job.text_blob()
+        if any(pat.search(blob) for pat in _CODE_PATTERNS):
+            reasons.append("вайбкодинг / код")
+        elif any(pat.search(blob) for pat in _CREATIVE_PATTERNS):
+            reasons.append("ИИ-креатив / видео / дизайн")
         if components.text < 0.4:
             reasons.append("слабое/мутное ТЗ")
         return reasons
+
+
+HARD_SIGNALS = (
+    "highload",
+    "высоконагруж",
+    "микросервис",
+    "блокчейн",
+    "smart contract",
+    "erp",
+    "1с",
+    "ios и android",
+    "под ключ с нуля",
+)
 
 
 def readiness_label(job: UnifiedJob) -> str:
     """Rough complexity hint used in cards when the LLM is disabled."""
 
     text = job.text_blob()
-    score = 0
-    if any(keyword in text for keyword in ("парсер", "бот", "скрипт", "автоматизац")):
-        score += 2
-    if any(keyword in text for keyword in ("api", "интеграц")):
-        score += 1
+    complexity = 1
+    if any(pat.search(text) for pat in _CODE_PATTERNS) or any(pat.search(text) for pat in _CREATIVE_PATTERNS):
+        complexity -= 1
+    if any(keyword in text for keyword in HARD_SIGNALS):
+        complexity += 2
     if len(text) > 1500:
-        score += 2
-    elif len(text) > 600:
-        score += 1
-    return "простая" if score <= 1 else "средняя" if score <= 3 else "сложная"
+        complexity += 2
+    elif len(text) > 700:
+        complexity += 1
+    return "простая" if complexity <= 1 else "средняя" if complexity <= 2 else "сложная"
 
 
 def human_budget(job: UnifiedJob) -> str:
@@ -262,8 +333,9 @@ def human_budget(job: UnifiedJob) -> str:
         formatted = f"{int(amount):,}".replace(",", " ")
     else:
         formatted = f"{amount:,.0f}".replace(",", " ")
-    prefix = "" if job.currency == "RUB" else ""
-    return f"{prefix}{formatted} {symbol}".strip()
+    if symbol in {"$", "€", "£"}:
+        return f"{symbol}{formatted}"
+    return f"{formatted} {symbol}".strip()
 
 
 def estimate_hours(job: UnifiedJob) -> float:

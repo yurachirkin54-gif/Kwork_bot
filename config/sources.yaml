@@ -14,21 +14,22 @@
 #   max_items        - hard cap of jobs handled per scan
 #
 # Verified against live public endpoints on 2026-11-17:
-#   Kwork              - official public RSS https://kwork.ru/rss          OK
-#   FL.ru              - public RSS https://www.fl.ru/rss/all.xml          OK
-#   Freelance.ru       - server-rendered article.task-card catalogue       OK
-#   Freelancehunt      - public RSS https://freelancehunt.com/projects.rss OK
-#   Freelancer.com     - official public REST API                         OK
-#   Remotive/RemoteOK  - open JSON APIs                                   OK
-#   Habr Freelance     - service closed permanently (RSS returns an HTML notice)
-#   Weblancer          - catalogue rendered by JS (use_browser required)
+#   Kwork              - https://kwork.ru/projects (stateData.wantsListData) OK
+#   FL.ru              - https://www.fl.ru/projects/ (+ RSS fallback)       OK
+#   Freelance.ru       - server-rendered article.task-card catalogue         OK
+#   Freelancehunt      - public RSS https://freelancehunt.com/projects.rss   OK
+#   Weblancer          - Next.js SSR RSC stream (no Playwright needed!)      OK
+#   Workspace          - official RSS https://workspace.ru/tenders/rss/      OK
+#   Kadrof             - generic HTML selector example (live working board)  OK
+#   Freelancer.com     - official public REST API                            OK
+#   Remotive/RemoteOK  - open JSON APIs + WeWorkRemotely RSS                 OK
+#   Habr Freelance     - service closed permanently (RSS returns HTML notice)
 #   YouDo              - ServicePipe JS challenge + captcha (not bypassed)
-#   Workspace          - anti-bot "Проверка безопасности" page on /tenders/
 # =============================================================================
 
 sources:
   # ---------------------------------------------------------------------------
-  # 1. Kwork - official public RSS (latest projects) + optional detail fetch
+  # 1. Kwork - real buyer projects from /projects (window.stateData JSON)
   # ---------------------------------------------------------------------------
   - name: kwork
     kind: kwork
@@ -37,28 +38,30 @@ sources:
     timeout: 25
     proxy_url: null
     use_browser: false
-    max_items: 40
-    category: "Разработка и IT"
+    max_items: 60
     params:
-      rss_url: "https://kwork.ru/rss"
-      listing_url: "https://kwork.ru/projects?c=41"
-      # Project pages require a logged-in session for most regions,
-      # so phase 2 is opt-in; the RSS already carries title, budget and text.
-      fetch_details: false
+      # Общая лента + Разработка и IT (c=11) + Дизайн/логотипы (c=15) + Видео/анимация (c=7)
+      min_request_interval: 0.35
+      listing_urls:
+        - "https://kwork.ru/projects"
+        - "https://kwork.ru/projects?c=11"
+        - "https://kwork.ru/projects?c=15"
+        - "https://kwork.ru/projects?c=7"
+      fetch_details: true
 
   # ---------------------------------------------------------------------------
-  # 2. FL.ru - public RSS (cp1251), budget is embedded in the title
+  # 2. FL.ru - HTML project catalogue (exact bid counts) + RSS fallback
   # ---------------------------------------------------------------------------
   - name: fl_ru
     kind: fl_ru
     enabled: true
-    interval_seconds: 120
+    interval_seconds: 90
     timeout: 25
-    max_items: 60
-    category: "Разработка и IT"
+    max_items: 50
     params:
+      listing_url: "https://www.fl.ru/projects/"
       rss_url: "https://www.fl.ru/rss/all.xml"
-      fetch_details: false
+      fetch_details: true
 
   # ---------------------------------------------------------------------------
   # 3. Freelance.ru - public HTML catalogue (article.task-card)
@@ -66,31 +69,15 @@ sources:
   - name: freelance_ru
     kind: freelance_ru
     enabled: true
-    interval_seconds: 150
+    interval_seconds: 120
     timeout: 25
     max_items: 40
-    category: "Разработка и IT"
     params:
       url: "https://freelance.ru/projects/"
       fetch_details: false
 
   # ---------------------------------------------------------------------------
-  # 4. Habr Freelance - service closed permanently; kept for completeness.
-  #    The adapter detects the shutdown notice and reports it as blocked.
-  # ---------------------------------------------------------------------------
-  - name: habr_freelance
-    kind: habr_freelance
-    enabled: false
-    interval_seconds: 300
-    timeout: 25
-    max_items: 40
-    notes: "Сервис Хабр Фриланс закрылся навсегда (RSS отдаёт HTML-заглушку)."
-    params:
-      rss_url: "https://freelance.habr.com/tasks.rss"
-      fetch_details: true
-
-  # ---------------------------------------------------------------------------
-  # 5. Freelancehunt - official API v2 with token, public RSS fallback
+  # 4. Freelancehunt - official API v2 with token, public RSS fallback
   # ---------------------------------------------------------------------------
   - name: freelancehunt
     kind: freelancehunt
@@ -99,55 +86,62 @@ sources:
     timeout: 25
     token_env: FREELANCEHUNT_TOKEN
     max_items: 50
-    category: "Разработка и IT"
     notes: "Токен API: https://freelancehunt.com/my/api (без него работает публичный RSS)."
     params:
       api_url: "https://api.freelancehunt.com/v2/projects"
       fallback_rss: "https://freelancehunt.com/projects.rss"
 
   # ---------------------------------------------------------------------------
-  # 6. Weblancer - Next.js catalogue, needs a browser for the task list
+  # 5. Weblancer - Next.js SSR RSC stream over plain HTTP (exact bids & USD)
   # ---------------------------------------------------------------------------
   - name: weblancer
     kind: weblancer
-    enabled: false
-    interval_seconds: 300
-    timeout: 30
+    enabled: true
+    interval_seconds: 120
+    timeout: 25
     use_browser: false
+    currency: USD
     max_items: 30
-    notes: "Лента отдаётся через JS. Включите use_browser: true и установите playwright."
     params:
       url: "https://www.weblancer.net/freelance/"
       fetch_details: false
 
   # ---------------------------------------------------------------------------
-  # 7. YouDo - ServicePipe JS challenge; disabled (no bypass)
-  # ---------------------------------------------------------------------------
-  - name: youdo
-    kind: youdo
-    enabled: false
-    interval_seconds: 300
-    timeout: 25
-    max_items: 30
-    notes: "Публичный каталог закрыт JS-антиботом ServicePipe, обход не поддерживается."
-    params:
-      url: "https://youdo.com/tasks-all-opened-all/"
-
-  # ---------------------------------------------------------------------------
-  # 8. Workspace - tender platform behind an anti-bot check
+  # 6. Workspace - official tenders RSS + HTML catalogue fallback
   # ---------------------------------------------------------------------------
   - name: workspace
     kind: workspace
-    enabled: false
-    interval_seconds: 600
-    timeout: 30
-    max_items: 30
-    notes: "Публичная выдача тендеров отдаёт страницу проверки безопасности."
+    enabled: true
+    interval_seconds: 300
+    timeout: 25
+    max_items: 40
     params:
+      rss_url: "https://workspace.ru/tenders/rss/"
       url: "https://workspace.ru/tenders/"
 
   # ---------------------------------------------------------------------------
-  # 9. Freelancer.com - official public REST API (no token needed)
+  # 7. Kadrof.ru - live Russian freelance board via zero-code GenericHTMLAdapter
+  # ---------------------------------------------------------------------------
+  - name: kadrof
+    kind: html
+    enabled: true
+    interval_seconds: 300
+    timeout: 25
+    currency: RUB
+    max_items: 30
+    params:
+      url: "https://www.kadrof.ru/work"
+      timezone: "Europe/Moscow"
+    selectors:
+      item: "div.post.project-list"
+      title: ".project-title h6 a"
+      url: ".project-title h6 a@href"
+      price: ".project-title .budget"
+      description: ":self"
+      published_at: ".date"
+
+  # ---------------------------------------------------------------------------
+  # 8. Freelancer.com - official public REST API (no token required)
   # ---------------------------------------------------------------------------
   - name: freelancer_com
     kind: freelancer_com
@@ -158,11 +152,11 @@ sources:
     category: "Software Development"
     params:
       api_url: "https://www.freelancer.com/api/projects/0.1/projects/active/"
-      query: "python OR bot OR scraper OR automation OR website"
+      query: "python OR bot OR telegram OR website OR landing OR scraper OR automation OR ai OR video OR logo"
       limit: 40
 
   # ---------------------------------------------------------------------------
-  # 10. Remote boards aggregator (Remotive, RemoteOK, WeWorkRemotely RSS)
+  # 9. Remote boards aggregator (Remotive, RemoteOK, WeWorkRemotely RSS)
   # ---------------------------------------------------------------------------
   - name: remote_boards
     kind: remote_boards
@@ -185,7 +179,34 @@ sources:
           url: "https://weworkremotely.com/categories/remote-programming-jobs.rss"
 
   # ---------------------------------------------------------------------------
-  # 11. EXAMPLE: any niche marketplace via RSS (no code required)
+  # 10. Habr Freelance - service closed permanently; kept for completeness
+  # ---------------------------------------------------------------------------
+  - name: habr_freelance
+    kind: habr_freelance
+    enabled: false
+    interval_seconds: 300
+    timeout: 25
+    max_items: 40
+    notes: "Сервис Хабр Фриланс закрылся навсегда (RSS отдаёт HTML-заглушку)."
+    params:
+      rss_url: "https://freelance.habr.com/tasks.rss"
+      fetch_details: true
+
+  # ---------------------------------------------------------------------------
+  # 11. YouDo - ServicePipe JS challenge; disabled (no bypass)
+  # ---------------------------------------------------------------------------
+  - name: youdo
+    kind: youdo
+    enabled: false
+    interval_seconds: 300
+    timeout: 25
+    max_items: 30
+    notes: "Публичный каталог закрыт JS-антиботом ServicePipe, обход не поддерживается."
+    params:
+      url: "https://youdo.com/tasks-all-opened-all/"
+
+  # ---------------------------------------------------------------------------
+  # 12. EXAMPLE: any niche marketplace via RSS (no code required)
   # ---------------------------------------------------------------------------
   - name: custom_rss_example
     kind: rss
@@ -201,7 +222,7 @@ sources:
       proposals: "(?i)(\\d+)\\s*(?:отклик|заявк|предложен)"
 
   # ---------------------------------------------------------------------------
-  # 12. EXAMPLE: any niche marketplace via HTML/CSS selectors
+  # 13. EXAMPLE: any niche marketplace via HTML/CSS selectors
   # ---------------------------------------------------------------------------
   - name: custom_html_example
     kind: html
@@ -230,7 +251,7 @@ sources:
       proposals: "(?i)(\\d+)"
 
   # ---------------------------------------------------------------------------
-  # 13. EXAMPLE: JSON/GraphQL API marketplace
+  # 14. EXAMPLE: JSON/GraphQL API marketplace
   # ---------------------------------------------------------------------------
   - name: custom_json_example
     kind: json

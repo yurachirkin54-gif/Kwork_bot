@@ -17,7 +17,7 @@ from app.models import SourceStatus
 from app.sources.base import SourceError
 from app.sources.registry import create_adapter
 from app.telegram.bot import AppContext
-from app.telegram.handlers import safe_edit
+from app.telegram.handlers import esc, safe_edit
 from app.telegram.keyboards import (
     back_to_menu_keyboard,
     cancel_keyboard,
@@ -68,13 +68,13 @@ async def build_sources_view(ctx: AppContext) -> tuple[str, Any]:
         config = ctx.config.get_source(status.name)
         interval = f"{config.interval_seconds} с" if config else "-"
         lines.append(
-            f"{source_icon(status)} · <b>{status.name}</b> ({config.kind if config else status.kind}) · "
+            f"{source_icon(status)} · <b>{esc(status.name)}</b> ({esc(config.kind if config else status.kind)}) · "
             f"24ч: {status.jobs_24h} · интервал {interval}"
         )
         if status.last_error:
-            lines.append(f"   ↳ {status.last_error[:120]}")
+            lines.append(f"   ↳ {esc(status.last_error[:120])}")
         if config and config.notes:
-            lines.append(f"   ℹ️ {config.notes[:140]}")
+            lines.append(f"   ℹ️ {esc(config.notes[:140])}")
     if len(lines) == 2:
         lines.append("Источники не настроены.")
     return "\n".join(lines), sources_keyboard(statuses)
@@ -89,8 +89,24 @@ async def show_sources(target: Message | CallbackQuery, ctx: AppContext) -> None
 
 
 @router.message(Command("sources"))
-async def cmd_sources(message: Message, ctx: AppContext) -> None:
+async def cmd_sources(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await show_sources(message, ctx)
+
+
+@router.message(Command("del_source"))
+async def cmd_del_source(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Использование: <code>/del_source имя_источника</code>", parse_mode="HTML")
+        return
+    name = parts[1].strip()
+    if ctx.config.remove_source(name):
+        ctx.engine.rebuild_adapters()
+        await message.answer(f"🗑 Источник <b>{esc(name)}</b> удалён.", parse_mode="HTML")
+    else:
+        await message.answer(f"Источник <b>{esc(name)}</b> не найден.", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "menu:sources")
@@ -122,7 +138,7 @@ async def cb_check_source(callback: CallbackQuery, ctx: AppContext) -> None:
     icon = "✅" if ok else "⚠️"
     text, markup = await build_sources_view(ctx)
     if isinstance(callback.message, Message):
-        await callback.message.answer(f"{icon} <b>{name}</b>: {message}", parse_mode="HTML")
+        await callback.message.answer(f"{icon} <b>{esc(name)}</b>: {esc(message)}", parse_mode="HTML")
     await safe_edit(callback, text, markup)
 
 
@@ -274,7 +290,7 @@ async def _preview_source(message: Message, ctx: AppContext, state: FSMContext) 
     except Exception as exc:
         await message.answer(f"Не удалось собрать конфиг: {exc}")
         return
-    adapter = create_adapter(config, ctx.engine.http, ctx.engine.converter)
+    adapter = create_adapter(config, ctx.engine.http, ctx.engine.converter, ctx.engine._browser)
     if adapter is None:
         await message.answer("Не удалось создать адаптер для этого типа источника.")
         return
@@ -283,7 +299,7 @@ async def _preview_source(message: Message, ctx: AppContext, state: FSMContext) 
         jobs = await adapter.fetch_listing()
     except SourceError as exc:
         await message.answer(
-            f"❌ Тест не прошёл: <b>{exc}</b>\n\n"
+            f"❌ Тест не прошёл: <b>{esc(exc)}</b>\n\n"
             "Проверьте URL/селекторы и попробуйте снова через /add_source.",
             parse_mode="HTML",
         )
@@ -291,10 +307,10 @@ async def _preview_source(message: Message, ctx: AppContext, state: FSMContext) 
         return
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception(f"add_source: тест упал: {exc}")
-        await message.answer(f"❌ Ошибка теста: {exc}")
+        await message.answer(f"❌ Ошибка теста: {esc(exc)}", parse_mode="HTML")
         await state.clear()
         return
-    preview = "\n".join(f"• {job.title[:90]} ({job.url})" for job in jobs[:3])
+    preview = "\n".join(f"• {esc(job.title[:90])} ({esc(job.url)})" for job in jobs[:3])
     await state.update_data(config=config.model_dump(mode="json"))
     await state.set_state(AddSource.waiting_confirm)
     await message.answer(

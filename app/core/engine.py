@@ -14,7 +14,7 @@ from app.config import ConfigManager
 from app.core.currency import CurrencyConverter
 from app.core.deduplicator import Deduplicator
 from app.core.rate_limiter import CircuitBreaker
-from app.models import ScoringResult, UnifiedJob, UserFilters, as_utc, utcnow
+from app.models import ScoringResult, UnifiedJob, UserFilters, as_utc, local_now, utcnow
 from app.processing.filters import HardFilter
 from app.processing.llm_analyzer import LLMAnalyzer
 from app.processing.scorer import JobScorer
@@ -88,6 +88,7 @@ class Engine:
         browser: BrowserClient | None = None,
         dry_run: bool = False,
         chat_ids: set[int] | None = None,
+        timezone: str = "Europe/Moscow",
     ) -> None:
         self.config = config
         self.repo = repository
@@ -96,6 +97,7 @@ class Engine:
         self.llm = llm or LLMAnalyzer(config.app.llm)
         self.dry_run = dry_run
         self.chat_ids = chat_ids or set()
+        self.timezone = timezone or "Europe/Moscow"
         self.http = http or HttpClient()
         self._browser = browser
         self.adapters = build_adapters(config.sources, self.http, converter, browser)
@@ -323,31 +325,32 @@ class Engine:
         if self.dry_run:
             report.seeded = len(listing)
             return
+        hard_filter = HardFilter(filters)
+        scorer = JobScorer(self.config.app.scoring, filters)
+        candidates: list[tuple[UnifiedJob, ScoringResult, int]] = []
         for job in listing:
             if job.budget_value is not None and job.budget_rub is None:
                 await self.converter.enrich(job)
-            score = JobScorer(self.config.app.scoring, filters).score(job)
+            score = scorer.score(job)
             row, created = await self.repo.upsert_job(job, score)
             if job.status in ("closed", "in_progress"):
                 await self.repo.set_job_hidden(row.id, True)
             elif created:
                 # Silently mark as seen: no push, no morning-digest spam.
                 await self.repo.mark_seeded(row.id)
+            if hard_filter.check(job).passed and score.total_score >= filters.min_notify_score:
+                candidates.append((job, score, row.id))
         report.seeded = len(listing)
 
         top_n = max(0, filters.send_top_n_on_start)
-        if top_n and self.notifier is not None:
+        if top_n and self.notifier is not None and not self._paused and not filters.quiet_hours.is_active(tz_name=self.timezone):
             fresh = sorted(
-                [job for job in listing if job.status == "open"],
-                key=lambda job: job.published_at or utcnow(),
+                candidates,
+                key=lambda item: (item[0].published_at or utcnow(), item[1].total_score),
                 reverse=True,
             )[:top_n]
-            for job in fresh:
-                row = await self.repo.get_job_by_key(job.source, job.external_id)
-                if row is None:
-                    continue
-                score = JobScorer(self.config.app.scoring, filters).score(job)
-                await self.notifier.submit(job, score, row.id, self.chat_ids)
+            for job, score, row_id in fresh:
+                await self.notifier.submit(job, score, row_id, self.chat_ids)
                 report.notified += 1
 
     async def _process_listing(
@@ -370,7 +373,9 @@ class Engine:
         rows_by_key = {(row.source, row.external_id): row for row in recent_rows}
 
         for job in new_jobs:
-            if adapter.needs_details(job):
+            # Cheap listing pre-check: skip Phase 2 detail HTTP calls when listing
+            # already clearly fails by status, age, proposals, budget, or exclude words.
+            if adapter.needs_details(job) and not self._clearly_rejected_in_listing(hard_filter, job):
                 try:
                     async with self._semaphore:
                         job = await adapter.fetch_details(job)
@@ -414,6 +419,18 @@ class Engine:
                     await self.repo.add_cross_post(
                         existing.id, job.source, job.external_id, job.url, duplicate.similarity
                     )
+                    if (
+                        existing.notified_at is not None
+                        and self.notifier is not None
+                        and hasattr(self.notifier, "refresh_card")
+                    ):
+                        posts = await self.repo.cross_posts_for(existing.id)
+                        notifications = await self.repo.notifications_for_job(existing.id)
+                        cross_names = [p.source for p in posts]
+                        for notification in notifications:
+                            await self.notifier.refresh_card(
+                                notification, existing, cross_posts=cross_names
+                            )
                 logger.info(
                     f"{job.source}/{job.external_id}: кросс-дубль {duplicate.source} "
                     f"({duplicate.similarity:.2f}) - без уведомления"
@@ -439,12 +456,28 @@ class Engine:
             rows_by_key[(job.source, job.external_id)] = row
             if not created:
                 continue
-            if self._paused or filters.quiet_hours.is_active():
+            if self._paused or filters.quiet_hours.is_active(tz_name=self.timezone):
                 report.deferred += 1
                 continue
             if self.notifier is not None:
                 await self.notifier.submit(job, score, row.id, self.chat_ids)
                 report.notified += 1
+
+    @staticmethod
+    def _clearly_rejected_in_listing(hard_filter: HardFilter, job: UnifiedJob) -> bool:
+        """Fast pre-check before Phase 2 HTTP detail requests."""
+
+        decision = hard_filter.check(job)
+        if decision.passed:
+            return False
+        reason = decision.reason
+        # Only allow Phase 2 to rescue jobs that failed due to missing description/include
+        # or missing budget/proposals that detail page might populate.
+        if reason.startswith("нет ни одного ключевого слова"):
+            return False
+        if "неизвестно" in reason or "договорная" in reason:
+            return False
+        return True
 
     def _detail(
         self, job: UnifiedJob, score: ScoringResult | None, note: str
@@ -482,7 +515,7 @@ class Engine:
                         continue
                     if self._next_run.get(adapter.name, 0.0) <= now:
                         due.append(adapter.name)
-                if due and not self._paused:
+                if due:
                     await self.scan_once(due)
                     now = loop.time()
                     for adapter in self.adapters:
@@ -520,7 +553,10 @@ class Engine:
                 continue
             reason = await self._stale_reason(job_row, filters, settings)
             if reason and self.notifier is not None and notification.message_id:
-                await self.notifier.mark_stale(notification, job_row, reason)
+                posts = await self.repo.cross_posts_for(job_row.id)
+                await self.notifier.mark_stale(
+                    notification, job_row, reason, cross_posts=[p.source for p in posts]
+                )
                 await self.repo.advance_notification(
                     notification.id, stage + 1, status="stale", stale_reason=reason
                 )
@@ -538,7 +574,7 @@ class Engine:
         adapter = self.get_adapter(job_row.source)
         if adapter is not None:
             unified = job_row.to_unified()
-            if adapter.needs_details(unified) or adapter.kind in {"kwork", "habr_freelance", "freelance_ru"}:
+            if adapter.needs_details(unified) or adapter.kind in {"kwork", "fl_ru", "habr_freelance", "freelance_ru"}:
                 try:
                     refreshed = await adapter.fetch_details(unified)
                     changed = False
@@ -565,22 +601,42 @@ class Engine:
                 return f"много откликов ({proposals})"
         return None
 
-    async def digest_tick(self) -> int:
-        """Send the morning digest once after quiet hours end."""
+    async def maybe_cleanup_old_jobs(self, days: int = 30) -> int:
+        """Once per local day prune old hidden noise jobs that left active feeds."""
 
+        today = local_now(self.timezone).date().isoformat()
+        if await self.repo.get_setting("cleanup_date") == today:
+            return 0
+        removed = await self.repo.cleanup_old_jobs(days=days)
+        await self.repo.set_setting("cleanup_date", today)
+        if removed:
+            logger.info(f"Очистка БД: удалено {removed} старых скрытых заказов (>{days} дн.)")
+        return removed
+
+    async def digest_tick(self) -> int:
+        """Send the morning digest once after quiet hours end (in user's timezone)."""
+
+        await self.maybe_cleanup_old_jobs()
+        if self._paused:
+            return 0
         filters = self.filters()
         quiet = filters.quiet_hours
-        if not quiet.enabled or quiet.is_active():
+        local = local_now(self.timezone)
+        if not quiet.enabled or quiet.is_active(now=local, tz_name=self.timezone):
             return 0
-        now = utcnow()
         end_hour, end_minute = (int(part) for part in quiet.end.split(":"))
-        window_start = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
-        if now < window_start or (now - window_start) > timedelta(hours=2):
+        window_start = local.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+        if local < window_start or (local - window_start) > timedelta(hours=2):
             return 0
-        today = now.date().isoformat()
+        today = local.date().isoformat()
         if await self.repo.get_setting("digest_sent_date") == today:
             return 0
-        jobs = await self.repo.digest_candidates(limit=10, max_proposals=filters.max_proposals)
+        jobs = await self.repo.digest_candidates(
+            limit=10,
+            max_proposals=filters.max_proposals,
+            min_score=filters.min_notify_score,
+            exclude_sources=filters.exclude_sources,
+        )
         await self.repo.set_setting("digest_sent_date", today)
         if not jobs or self.notifier is None:
             return 0
@@ -614,15 +670,20 @@ class Engine:
             return row, f"Не удалось обновить: {exc}"
         except Exception as exc:  # pragma: no cover - defensive
             return row, f"Ошибка обновления: {exc}"
+        new_desc = (
+            refreshed.description
+            if refreshed.description and len(refreshed.description) > len(row.description or "")
+            else None
+        )
         row = await self.repo.update_job(
             job_id,
             proposals_count=refreshed.proposals_count,
             status=refreshed.status if refreshed.status != "unknown" else None,
-            description=refreshed.description,
+            description=new_desc,
         ) or row
         if (row.proposals_count, row.status) != before:
             return row, "Данные обновлены"
-        if not adapter.config.params.get("fetch_details", True):
+        if not adapter.config.params.get("fetch_details", True) and adapter.kind not in {"kwork", "fl_ru", "freelance_ru"}:
             return row, "Источник не отдаёт детальные данные"
         return row, "Актуально - изменений нет"
 

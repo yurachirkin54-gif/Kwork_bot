@@ -132,7 +132,10 @@ class GenericHTMLAdapter(BaseSourceAdapter):
         if proposals is None and proposals_text:
             proposals = extract_int(proposals_text)
 
-        published = self.parse_datetime(self._text(node, self.selectors.published_at))
+        published = self.parse_datetime(
+            self._text(node, self.selectors.published_at),
+            tz_name=self.config.params.get("timezone"),
+        )
         status_text = self._text(node, self.selectors.status)
         status = self.extract_status(status_text, default=self.default_status)  # type: ignore[arg-type]
         if descriptions_indicate_closed(description):

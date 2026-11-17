@@ -12,16 +12,20 @@ from app.sources.native.freelancehunt import FreelanceHuntAdapter
 from app.sources.native.freelancer_com import FreelancerComAdapter
 from app.sources.native.habr_freelance import HabrFreelanceAdapter
 from app.sources.native.kwork import KworkAdapter
+from app.sources.native.weblancer import WeblancerAdapter
+from app.sources.native.workspace import WorkspaceAdapter
 
 
-async def test_kwork_rss_and_detail(fixture_bytes, make_config, stub_factory, converter) -> None:
+async def test_kwork_statedata_and_detail(fixture_bytes, make_config, stub_factory, converter) -> None:
     config = make_config(
-        name="kwork", kind="kwork", params={"rss_url": "https://kwork.ru/rss", "fetch_details": True}
+        name="kwork",
+        kind="kwork",
+        params={"listing_url": "https://kwork.ru/projects", "fetch_details": True},
     )
     http = stub_factory(
         {
-            "https://kwork.ru/rss": fixture_bytes("kwork_rss.xml"),
-            "https://kwork.ru/script-programming/55524084": fixture_bytes("kwork_detail.html"),
+            "https://kwork.ru/projects/3274099/view": fixture_bytes("kwork_detail_state.html"),
+            "https://kwork.ru/projects": fixture_bytes("kwork_projects.html"),
         }
     )
     adapter = KworkAdapter(config, http, converter)
@@ -30,27 +34,35 @@ async def test_kwork_rss_and_detail(fixture_bytes, make_config, stub_factory, co
     assert len(jobs) == 2
     first = jobs[0]
     assert first.source == "kwork"
-    assert first.external_id == "55524084"
-    assert first.budget_min == 5000
-    assert first.budget_rub == 5000
+    assert first.external_id == "3274099"
+    assert first.url == "https://kwork.ru/projects/3274099/view"
+    assert first.budget_min == 4000
+    assert first.budget_max == 7000
+    assert first.budget_rub == 7000
+    assert first.proposals_count == 2
     assert first.status == "open"
-    assert first.category == "Разработка и IT"
-    assert "Python" in first.description
+    assert first.category is not None and "Разработка и IT" in first.category
+    assert first.client_hire_rate == pytest.approx(0.8)
+    # 18:00 MSK (UTC+3) -> 15:00 UTC
+    assert first.published_at is not None and first.published_at.hour == 15
+    assert adapter.needs_details(first) is False
+
+    second = jobs[1]
+    assert second.status == "closed"
 
     enriched = await adapter.fetch_details(first)
-    assert enriched.proposals_count == 3
-    assert "CSV" in enriched.description
-    assert enriched.budget_min == 5500
-    assert enriched.client_rating == pytest.approx(4.9)
+    assert enriched.proposals_count == 5
+    assert "Расширенное ТЗ" in enriched.description
+    assert enriched.budget_min == 4500
+    assert enriched.budget_max == 7500
 
 
 async def test_kwork_html_fallback(make_config, stub_factory, converter, fixture_bytes) -> None:
     config = make_config(
-        name="kwork", kind="kwork", params={"rss_url": "https://kwork.ru/rss", "listing_url": "https://kwork.ru/projects"}
+        name="kwork", kind="kwork", params={"listing_url": "https://kwork.ru/projects", "fetch_details": True}
     )
     http = stub_factory(
         {
-            "https://kwork.ru/rss": "<rss version='2.0'><channel></channel></rss>",
             "https://kwork.ru/projects": fixture_bytes("kwork_detail.html"),
         }
     )
@@ -59,11 +71,40 @@ async def test_kwork_html_fallback(make_config, stub_factory, converter, fixture
     assert len(jobs) == 1
     assert jobs[0].external_id == "55524084"
     assert jobs[0].budget_min == 5500
+    assert jobs[0].proposals_count == 3
+
+
+async def test_fl_ru_html_with_proposals(fixture_bytes, make_config, stub_factory, converter) -> None:
+    config = make_config(
+        name="fl_ru",
+        kind="fl_ru",
+        params={"listing_url": "https://www.fl.ru/projects/", "fetch_details": False},
+    )
+    http = stub_factory({"https://www.fl.ru/projects/": fixture_bytes("fl_projects.html")})
+    adapter = FlRuAdapter(config, http, converter)
+    jobs = await adapter.fetch_listing()
+
+    assert len(jobs) == 2
+    assert jobs[0].external_id == "5529633"
+    assert jobs[0].budget_min == 6000
+    assert jobs[0].proposals_count == 1
+    assert jobs[0].published_at is not None
+    assert jobs[1].proposals_count == 0
+    assert jobs[1].budget_type == "negotiable"
 
 
 async def test_fl_ru_extracts_budget_from_title(fixture_bytes, make_config, stub_factory, converter) -> None:
-    config = make_config(name="fl_ru", kind="fl_ru", params={"rss_url": "https://www.fl.ru/rss/all.xml"})
-    http = stub_factory({"https://www.fl.ru/rss/all.xml": fixture_bytes("fl_rss.xml")})
+    config = make_config(
+        name="fl_ru",
+        kind="fl_ru",
+        params={"listing_url": "https://www.fl.ru/projects/", "rss_url": "https://www.fl.ru/rss/all.xml"},
+    )
+    http = stub_factory(
+        {
+            "https://www.fl.ru/projects/": HttpError(503, "fl", "unavailable"),
+            "https://www.fl.ru/rss/all.xml": fixture_bytes("fl_rss.xml"),
+        }
+    )
     adapter = FlRuAdapter(config, http, converter)
     jobs = await adapter.fetch_listing()
 
@@ -75,6 +116,50 @@ async def test_fl_ru_extracts_budget_from_title(fixture_bytes, make_config, stub
     assert "&#8381;" not in first.title
     assert first.source == "fl_ru"
     assert first.published_at is not None
+
+
+async def test_weblancer_rsc_stream(fixture_bytes, make_config, stub_factory, converter) -> None:
+    config = make_config(
+        name="weblancer", kind="weblancer", currency="USD", params={"url": "https://www.weblancer.net/freelance/"}
+    )
+    http = stub_factory({"https://www.weblancer.net/freelance/": fixture_bytes("weblancer_rsc.html")})
+    adapter = WeblancerAdapter(config, http, converter)
+    jobs = await adapter.fetch_listing()
+
+    assert len(jobs) == 2
+    first = jobs[0]
+    assert first.external_id == "1270601"
+    assert first.currency == "USD"
+    assert first.budget_min == 500
+    assert first.budget_usd == 500
+    assert first.proposals_count == 2
+    assert "парсингу сайта" in first.description
+    assert first.client_verified is True
+    assert first.client_hire_rate == pytest.approx(0.75)
+    assert first.client_reviews == 12
+    assert first.skills == ["Python"]
+
+    second = jobs[1]
+    assert second.budget_type == "negotiable"
+    assert second.proposals_count == 0
+
+
+async def test_workspace_rss_ignores_deadline_dates(fixture_bytes, make_config, stub_factory, converter) -> None:
+    config = make_config(
+        name="workspace",
+        kind="workspace",
+        params={"rss_url": "https://workspace.ru/tenders/rss/", "url": "https://workspace.ru/tenders/"},
+    )
+    http = stub_factory({"https://workspace.ru/tenders/rss/": fixture_bytes("workspace_rss.xml")})
+    adapter = WorkspaceAdapter(config, http, converter)
+    jobs = await adapter.fetch_listing()
+
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.external_id == "19152"
+    assert job.budget_min == 50000
+    assert job.budget_max == 120000
+    assert job.proposals_count is None  # Must NOT match 27 from 27.11.2026!
 
 
 async def test_freelance_ru_html(fixture_bytes, make_config, stub_factory, converter) -> None:

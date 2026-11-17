@@ -11,15 +11,21 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./config:/app/config:ro
+      - ./config:/app/config
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "python", "-c", "import sqlite3,os; print(os.path.exists('/app/data/kwork.db'))"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,sys,time; p='/app/data/.heartbeat'; ok=os.path.exists(p) and (time.time()-float(open(p).read().strip() or 0))<240; sys.exit(0 if ok else 1)",
+        ]
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 30s

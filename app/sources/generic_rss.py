@@ -74,7 +74,8 @@ class GenericRSSAdapter(BaseSourceAdapter):
                     budget_max = amount
         proposals = self.extract_proposals(description, self.proposals_pattern)
         published = self.parse_datetime(
-            entry.get("published") or entry.get("updated") or entry.get("published_parsed")
+            entry.get("published") or entry.get("updated") or entry.get("published_parsed"),
+            tz_name=self.config.params.get("timezone"),
         )
         external_id = self._external_id(entry, link)
         skills = [tag.get("term", "") for tag in entry.get("tags", []) if isinstance(tag, dict)]

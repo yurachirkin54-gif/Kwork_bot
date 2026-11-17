@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,14 +66,18 @@ class HttpClient:
         limiter: RateLimiter | None = None,
         max_bytes: int = 4_000_000,
         client: httpx.AsyncClient | None = None,
+        max_cache_entries: int = 128,
+        max_cache_entry_bytes: int = 1_000_000,
     ) -> None:
         self.timeout = timeout
         self.proxy = proxy or None
         self.limiter = limiter or RateLimiter(default_interval=0.8)
         self.max_bytes = max_bytes
+        self.max_cache_entries = max(0, int(max_cache_entries))
+        self.max_cache_entry_bytes = max(0, int(max_cache_entry_bytes))
         self._client = client
         self._owns_client = client is None
-        self._cache: dict[str, _CacheEntry] = {}
+        self._cache: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._proxy_clients: dict[str | None, httpx.AsyncClient] = {}
 
     async def aclose(self) -> None:
@@ -150,6 +155,7 @@ class HttpClient:
             raise HttpError(502, url, str(exc)) from exc
 
         if response.status_code == 304 and cached is not None:
+            self._cache.move_to_end(url)
             return FetchResult(
                 text=cached.text,
                 status=304,
@@ -169,7 +175,12 @@ class HttpClient:
         if response.status_code >= 400:
             raise HttpError(response.status_code, str(response.url), body[:4000])
 
-        if conditional:
+        if conditional and self.max_cache_entries > 0 and len(raw) <= self.max_cache_entry_bytes:
+            if url in self._cache:
+                self._cache.move_to_end(url)
+            else:
+                while len(self._cache) >= self.max_cache_entries:
+                    self._cache.popitem(last=False)
             self._cache[url] = _CacheEntry(
                 text=body,
                 etag=response.headers.get("ETag"),

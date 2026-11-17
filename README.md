@@ -163,16 +163,17 @@ run_bot.bat
 
 | Биржа | Механизм | Статус | Примечание |
 |---|---|---|---|
-| **Kwork** | официальный публичный RSS `https://kwork.ru/rss` | ✅ работает без ключа | лента отдаёт последние ~5 проектов; бюджет в заголовке |
-| **FL.ru** | публичный RSS `https://www.fl.ru/rss/all.xml` | ✅ работает без ключа | cp1251 + `&#8381;`, обработано; бюджет в заголовке |
-| **Freelance.ru** | HTML-каталог `article.task-card` | ✅ работает без ключа | отклики, бюджет, дата, категория |
+| **Kwork** | биржа проектов `/projects` (`stateData.wantsListData`) | ✅ работает без ключа | реальные заказы покупателей, точные `kwork_count` отклики, бюджет, % найма, live-обновление |
+| **FL.ru** | HTML-каталог `/projects/` + RSS fallback | ✅ работает без ключа | точное число ответов (`0`, `1`, `116`), бюджет, дата, догрузка карточки |
+| **Freelance.ru** | HTML-каталог `article.task-card` | ✅ работает без ключа | отклики, бюджет, дата, категория, догрузка `.tv-hero` |
 | **Freelancehunt** | API v2 + RSS fallback `https://freelancehunt.com/projects.rss` | ✅ RSS без ключа; API — с токеном | токен: <https://freelancehunt.com/my/api> → `FREELANCEHUNT_TOKEN` |
+| **Weblancer** | Next.js SSR (`self.__next_f` RSC-поток) | ✅ работает без ключа и Playwright | точные отклики, бюджет в `$`, статистика заказчика |
+| **Workspace** | официальный RSS `https://workspace.ru/tenders/rss/` + HTML | ✅ работает без ключа | тендеры, бюджеты, даты (при включении антибота автоматически уходит в backoff) |
+| **Kadrof** | `GenericHTMLAdapter` (`div.post.project-list`) | ✅ работает без ключа | живой пример подключения сторонней биржи без Python-кода |
 | **Freelancer.com** | официальное публичное REST API | ✅ работает без ключа | бюджет, `bid_count`, навыки, валюта |
-| **Remote Boards** | Remotive API + RemoteOK API + WeWorkRemotely RSS | ✅ работает без ключа | вакансии часто старше 24 ч → отсекаются `max_age_minutes`; поднимите лимит в `/filters`, если нужны |
+| **Remote Boards** | Remotive API + RemoteOK API + WeWorkRemotely RSS | ✅ работает без ключа | отсортированы от самых свежих; старые отсекаются `max_age_minutes` |
 | **Habr Freelance** | RSS | ⛔ сервис закрыт навсегда | RSS отдаёт HTML-заглушку; адаптер корректно репортит `blocked` |
-| **Weblancer** | Next.js, лента через JS | ⚠️ выключен | включите и поставьте `use_browser: true` (Playwright), либо задайте селекторы |
 | **YouDo** | JS-антибот ServicePipe + captcha | ⛔ выключен | обход не реализуется принципиально |
-| **Workspace** | тендеры за антибот-проверкой | ⛔ выключен | публичная выдача отдаёт «Проверка безопасности» |
 
 Важно: адаптер никогда не «падает молча». При 403/429/капче/изменении разметки
 источник получает состояние `blocked` / `rate_limited` / `parse_error`, уходит
@@ -191,16 +192,16 @@ run_bot.bat
 
 | Фильтр | По умолчанию | Смысл |
 |---|---|---|
-| `min_budget_rub` | `1500` | минимальный бюджет в рублях |
-| `min_budget_usd` | `20` | минимум для валютных заказов |
+| `min_budget_rub` | `1000` | минимальный бюджет в рублях |
+| `min_budget_usd` | `15` | минимум для валютных заказов |
 | `max_proposals` | `5` | больше откликов — не присылаем |
 | `allow_unknown_proposals` | `true` | присылать заказы с «отклики: н/д» |
-| `min_notify_score` | `55` | порог отправки |
+| `min_notify_score` | `50` | порог отправки |
 | `allow_negotiable` | `true` | присылать «договорную» цену |
 | `max_age_minutes` | `1440` | свежесть (24 часа) |
-| `include_keywords` | `[]` | пусто = все категории |
-| `exclude_keywords` | скам/казино/«за отзыв»/… | стоп-лист |
-| `include_regex` / `exclude_regex` | `[]` | регулярные выражения |
+| `include_keywords` | профиль вайбкодинг + AI/Veo/лого | боты, сайты, доработки, проверки, AI-видео, дизайн |
+| `exclude_keywords` | скам/казино/лидген/1С/офлайн/… | стоп-лист |
+| `include_regex` / `exclude_regex` | настроены под код/AI и отсечение очной съёмки | регулярные выражения |
 | `exclude_sources` | `[]` | полностью игнорировать биржу |
 | `quiet_hours` | выкл., `00:00–08:00` | тихие часы + утренний дайджест |
 | `cold_start_mode` | `silent_seed` | первый запуск без спама |
@@ -283,6 +284,7 @@ LLM_MODEL=llama3.1
 | `/filters` | интерактивное изменение всех фильтров, стоп-слов и тихих часов |
 | `/sources` | список бирж с индикаторами `🟢 OK / 🟡 Backoff / 🔴 Blocked / ⏸ Выкл` |
 | `/add_source` | пошаговый мастер добавления RSS/HTML/JSON-биржи с тестовым прогоном |
+| `/del_source` | удаление источника по имени (`/del_source myboard`) |
 
 Под каждой карточкой:
 
@@ -436,6 +438,7 @@ HTML/RSS/JSON фикстуры лежат в `tests/fixtures/`.
 
 ```bash
 cp .env.example .env      # заполнить токен и ID
+mkdir -p data logs && sudo chown -R 1000:1000 data logs config  # права для botuser (UID 1000)
 docker compose up -d --build
 docker compose logs -f
 ```
@@ -444,7 +447,8 @@ docker compose logs -f
 
 - рестарт `unless-stopped`;
 - `data/` и `logs/` смонтированы на хост (база и логи переживают пересборку);
-- `config/` монтируется read-only (правки YAML — на хосте);
+- `config/` смонтирован rw (правки стоп-слов и вкл/выкл бирж из бота сохраняются в YAML);
+- `healthcheck` проверяет свежесть `data/.heartbeat` (обновляется каждую минуту циклом движка);
 - ротация логов Docker (10 МБ × 3).
 
 Для PostgreSQL: раскомментируйте `DATABASE_URL=postgresql+asyncpg://...`

@@ -28,8 +28,12 @@ class FakeNotifier:
     async def send_health_alert(self, text: str) -> None:
         self.health.append(text)
 
-    async def mark_stale(self, notification, row, reason: str) -> None:  # noqa: ANN001
+    async def mark_stale(self, notification, row, reason: str, cross_posts=None) -> None:  # noqa: ANN001
         self.stale.append((row.id, reason))
+
+    async def refresh_card(self, notification, row, *, stale_reason=None, cross_posts=None) -> None:  # noqa: ANN001
+        if stale_reason:
+            self.stale.append((row.id, stale_reason))
 
     async def send_digest(self, jobs) -> None:  # noqa: ANN001
         self.digest.extend(jobs)

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from loguru import logger
@@ -64,7 +66,7 @@ class AccessMiddleware(BaseMiddleware):
 
 
 def create_bot(token: str) -> Bot:
-    return Bot(token=token)
+    return Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 
 def create_dispatcher(ctx: AppContext, allowed_ids: set[int]) -> Dispatcher:

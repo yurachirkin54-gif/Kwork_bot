@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.models import minutes_ago_label, utcnow
 from app.telegram.bot import AppContext
-from app.telegram.handlers import safe_edit
+from app.telegram.handlers import esc, safe_edit
 from app.telegram.keyboards import menu_keyboard
 
 router = Router(name="menu")
@@ -55,12 +55,12 @@ async def build_stats_text(ctx: AppContext) -> str:
         lines.append("")
         lines.append("<b>По источникам за 24ч:</b>")
         for source, count in list(day["by_source"].items())[:12]:
-            lines.append(f"• {source}: {count}")
+            lines.append(f"• {esc(source)}: {count}")
     if day["top"]:
         lines.append("")
         lines.append("<b>Топ заказов:</b>")
         for item in day["top"][:5]:
-            lines.append(f"• {item['score']:.0f} · {item['source']} · {item['title'][:70]}")
+            lines.append(f"• {item['score']:.0f} · {esc(item['source'])} · {esc(item['title'][:70])}")
     feedback = await ctx.repo.feedback_summary()
     if feedback:
         lines.append("")
@@ -71,38 +71,50 @@ async def build_stats_text(ctx: AppContext) -> str:
 
 
 @router.message(Command("start", "menu", "help"))
-async def cmd_start(message: Message, ctx: AppContext) -> None:
+async def cmd_start(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(
-        await build_status_text(ctx), reply_markup=menu_keyboard(ctx.engine.paused)
+        await build_status_text(ctx), parse_mode="HTML", reply_markup=menu_keyboard(ctx.engine.paused)
     )
 
 
 @router.message(Command("status"))
-async def cmd_status(message: Message, ctx: AppContext) -> None:
+async def cmd_status(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(
-        await build_status_text(ctx), reply_markup=menu_keyboard(ctx.engine.paused)
+        await build_status_text(ctx), parse_mode="HTML", reply_markup=menu_keyboard(ctx.engine.paused)
     )
 
 
 @router.message(Command("stats"))
-async def cmd_stats(message: Message, ctx: AppContext) -> None:
-    await message.answer(await build_stats_text(ctx))
+async def cmd_stats(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(await build_stats_text(ctx), parse_mode="HTML")
 
 
 @router.message(Command("pause"))
-async def cmd_pause(message: Message, ctx: AppContext) -> None:
+async def cmd_pause(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await ctx.engine.set_paused(True)
     await message.answer("⏸ Рассылка приостановлена. Заказы продолжают собираться в базу.")
 
 
 @router.message(Command("resume"))
-async def cmd_resume(message: Message, ctx: AppContext) -> None:
+async def cmd_resume(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await ctx.engine.set_paused(False)
-    await message.answer("▶️ Рассылка возобновлена.", reply_markup=menu_keyboard(False))
+    pending = await ctx.repo.pending_count(min_score=ctx.engine.filters().min_notify_score)
+    hint = f"\nВ базе накопилось подходящих заказов: <b>{pending}</b>." if pending else ""
+    await message.answer(
+        f"▶️ Рассылка возобновлена.{hint}",
+        parse_mode="HTML",
+        reply_markup=menu_keyboard(False),
+    )
 
 
 @router.message(Command("scan"))
-async def cmd_scan(message: Message, ctx: AppContext) -> None:
+async def cmd_scan(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await message.answer("🔄 Запускаю внеочередное сканирование...")
     reports = await ctx.engine.scan_once(force=True)
     if not reports:
@@ -110,11 +122,11 @@ async def cmd_scan(message: Message, ctx: AppContext) -> None:
         return
     lines = ["✅ <b>Сканирование завершено</b>", ""]
     lines.extend(reports_lines(reports))
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 def reports_lines(reports) -> list[str]:
-    return [f"• {report.summary()}" for report in reports]
+    return [f"• {esc(report.summary())}" for report in reports]
 
 
 @router.callback_query(F.data == "menu:main")

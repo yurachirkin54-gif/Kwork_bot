@@ -7,7 +7,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -348,7 +348,10 @@ class Repository:
         if not offsets:
             return []
         now = utcnow()
-        earliest = now - timedelta(minutes=max(1, min(offsets)))
+        stage_filters = [
+            (Notification.check_stage == idx) & (Notification.sent_at <= now - timedelta(minutes=offset))
+            for idx, offset in enumerate(offsets)
+        ]
         async with self._session() as session:
             rows = await session.execute(
                 select(Notification, Job)
@@ -357,7 +360,7 @@ class Repository:
                     Notification.status == "sent",
                     Notification.message_id.is_not(None),
                     Notification.check_stage < len(offsets),
-                    Notification.sent_at <= earliest,
+                    or_(*stage_filters),
                 )
                 .order_by(Notification.sent_at.asc())
                 .limit(limit)
@@ -383,6 +386,15 @@ class Repository:
             if stale_reason:
                 row.stale_reason = stale_reason
             await session.commit()
+
+    async def notifications_for_job(self, job_id: int) -> list[Notification]:
+        async with self._session() as session:
+            rows = await session.execute(
+                select(Notification)
+                .where(Notification.job_id == job_id, Notification.message_id.is_not(None))
+                .order_by(Notification.sent_at.desc())
+            )
+            return list(rows.scalars())
 
     async def notification_for_job(self, job_id: int) -> Notification | None:
         async with self._session() as session:
@@ -472,24 +484,64 @@ class Repository:
                 ],
             }
 
-    async def digest_candidates(self, limit: int = 10, max_proposals: int = 5) -> list[Job]:
+    async def digest_candidates(
+        self,
+        limit: int = 10,
+        max_proposals: int = 5,
+        *,
+        min_score: float = 0.0,
+        max_age_hours: int = 48,
+        exclude_sources: Sequence[str] | None = None,
+    ) -> list[Job]:
+        since = utcnow() - timedelta(hours=max(1, max_age_hours))
+        conditions = [
+            Job.notified_at.is_(None),
+            Job.is_hidden.is_(False),
+            Job.status.in_(("open", "unknown")),
+            Job.score >= min_score,
+            Job.first_seen_at >= since,
+            (Job.proposals_count.is_(None)) | (Job.proposals_count <= max_proposals),
+        ]
+        if exclude_sources:
+            conditions.append(~Job.source.in_(list(exclude_sources)))
         async with self._session() as session:
             rows = await session.execute(
                 select(Job)
-                .where(
-                    Job.notified_at.is_(None),
-                    Job.is_hidden.is_(False),
-                    Job.status == "open",
-                    (Job.proposals_count.is_(None)) | (Job.proposals_count <= max_proposals),
-                )
+                .where(*conditions)
                 .order_by(Job.score.desc(), Job.published_at.desc())
                 .limit(limit)
             )
             return list(rows.scalars())
 
-    async def pending_count(self) -> int:
+    async def pending_count(self, min_score: float = 0.0) -> int:
         async with self._session() as session:
             rows = await session.execute(
-                select(func.count(Job.id)).where(Job.notified_at.is_(None), Job.is_hidden.is_(False))
+                select(func.count(Job.id)).where(
+                    Job.notified_at.is_(None),
+                    Job.is_hidden.is_(False),
+                    Job.status.in_(("open", "unknown")),
+                    Job.score >= min_score,
+                )
             )
             return int(rows.scalar_one() or 0)
+
+    async def cleanup_old_jobs(self, days: int = 30) -> int:
+        """Delete old hidden/unnotified noise jobs that have fallen off active feeds."""
+        cutoff = utcnow() - timedelta(days=max(1, days))
+        async with self._session() as session:
+            has_notif = select(Notification.id).where(Notification.job_id == Job.id).exists()
+            has_fb = select(Feedback.id).where(Feedback.job_id == Job.id).exists()
+            has_cp = select(CrossPost.id).where(CrossPost.job_id == Job.id).exists()
+            result = await session.execute(
+                delete(Job).where(
+                    Job.is_hidden.is_(True),
+                    Job.notified_at.is_(None),
+                    Job.first_seen_at < cutoff,
+                    Job.last_seen_at < cutoff,
+                    ~has_notif,
+                    ~has_fb,
+                    ~has_cp,
+                )
+            )
+            await session.commit()
+            return int(result.rowcount or 0)

@@ -93,21 +93,23 @@ def filters_keyboard(filters: UserFilters) -> InlineKeyboardMarkup:
         ],
     ]
     keyword_rows: list[list[InlineKeyboardButton]] = []
-    for index, keyword in enumerate(filters.include_keywords[:8]):
+    for index, keyword in enumerate(filters.include_keywords[-10:]):
+        real_index = max(0, len(filters.include_keywords) - 10) + index
         keyword_rows.append(
             [
                 InlineKeyboardButton(
                     text=f"✅ {keyword[:24]} ✖",
-                    callback_data=f"flt:kwdel:include:{index}",
+                    callback_data=f"flt:kwdel:include:{real_index}",
                 )
             ]
         )
-    for index, keyword in enumerate(filters.exclude_keywords[:10]):
+    for index, keyword in enumerate(filters.exclude_keywords[-12:]):
+        real_index = max(0, len(filters.exclude_keywords) - 12) + index
         keyword_rows.append(
             [
                 InlineKeyboardButton(
                     text=f"⛔ {keyword[:24]} ✖",
-                    callback_data=f"flt:kwdel:exclude:{index}",
+                    callback_data=f"flt:kwdel:exclude:{real_index}",
                 )
             ]
         )
@@ -197,4 +199,14 @@ def dislike_keyboard(job_id: int) -> InlineKeyboardMarkup:
 def cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="fsm:cancel")]]
+    )
+
+
+def proposal_keyboard(job_id: int, *, llm_enabled: bool = False) -> InlineKeyboardMarkup | None:
+    if not llm_enabled:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Перегенерировать (AI)", callback_data=f"job:proposal_regen:{job_id}")]
+        ]
     )

@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from app.models import QuietHours, UserFilters
 from app.telegram.bot import AppContext
-from app.telegram.handlers import safe_edit
+from app.telegram.handlers import esc, safe_edit
 from app.telegram.keyboards import cancel_keyboard, filters_keyboard
 
 router = Router(name="filters")
@@ -54,8 +54,8 @@ def build_filters_text(filters: UserFilters) -> str:
             f"🤝 Договорная: <b>{'да' if filters.allow_negotiable else 'нет'}</b>",
             f"{quiet}",
             "",
-            f"✅ Ключевые слова ({len(filters.include_keywords)}): {include}",
-            f"⛔ Стоп-слова ({len(filters.exclude_keywords)}): {exclude}",
+            f"✅ Ключевые слова ({len(filters.include_keywords)}): {esc(include)}",
+            f"⛔ Стоп-слова ({len(filters.exclude_keywords)}): {esc(exclude)}",
         ]
     )
 
@@ -71,7 +71,8 @@ async def show_filters(target: Message | CallbackQuery, ctx: AppContext) -> None
 
 
 @router.message(Command("filters"))
-async def cmd_filters(message: Message, ctx: AppContext) -> None:
+async def cmd_filters(message: Message, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await show_filters(message, ctx)
 
 
