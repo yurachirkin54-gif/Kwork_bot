@@ -10,10 +10,11 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.types import Message
 from app.config import ConfigManager, LLMConfig, reset_env_cache
 from app.core.engine import Engine
-from app.main import create_services
+from app.main import _supervise, create_services
 from app.models import QuietHours, ScoringResult, ScoreComponents, UserFilters, utcnow
 from app.processing.filters import HardFilter
 from app.processing.llm_analyzer import LLMAnalyzer, template_proposal
@@ -24,6 +25,7 @@ from app.storage.database import Database
 from app.storage.orm import Job, Notification
 from app.storage.repository import Repository
 from app.telegram.handlers.job_actions import cb_proposal
+from app.telegram.notifier import Notifier
 
 
 @pytest_asyncio.fixture
@@ -342,3 +344,43 @@ async def test_create_services_forwards_global_http_proxy(monkeypatch) -> None:
         reset_env_cache()
 
 
+
+
+async def test_supervise_restarts_crashed_task_until_clean_exit() -> None:
+    calls = {"n": 0}
+
+    async def flaky() -> None:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("boom")
+
+    await _supervise("flaky", flaky, min_delay=0.01, max_delay=0.02)
+    assert calls["n"] == 3
+
+
+async def test_notifier_retries_on_network_error_then_delivers() -> None:
+    attempts = {"n": 0}
+
+    class FlakyBot:
+        async def send_message(self, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise TelegramNetworkError(method=MagicMock(), message="net down")
+            return SimpleNamespace(message_id=42)
+
+    notifier = Notifier(FlakyBot(), MagicMock(), lambda: UserFilters(), chat_ids={1}, throttle_seconds=0)
+    notifier.SEND_RETRY_DELAYS = (0.0, 0.01, 0.01, 0.01)
+    message = await notifier._send(1, "hello")
+    assert message.message_id == 42
+    assert attempts["n"] == 3
+
+
+async def test_notifier_gives_up_after_all_retries() -> None:
+    class DeadBot:
+        async def send_message(self, **kwargs):
+            raise TelegramNetworkError(method=MagicMock(), message="net down")
+
+    notifier = Notifier(DeadBot(), MagicMock(), lambda: UserFilters(), chat_ids={1}, throttle_seconds=0)
+    notifier.SEND_RETRY_DELAYS = (0.0, 0.01)
+    with pytest.raises(TelegramNetworkError):
+        await notifier._send(1, "hello")

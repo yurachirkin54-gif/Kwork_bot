@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
+from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramUnauthorizedError
 from loguru import logger
 
 from app.config import ConfigError, ConfigManager, EnvSettings, get_env
@@ -252,6 +257,58 @@ async def _digest_loop(engine: Engine) -> None:
             logger.exception(f"Дайджест упал: {exc}")
 
 
+async def _supervise(
+    name: str,
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    min_delay: float = 5.0,
+    max_delay: float = 120.0,
+) -> None:
+    """Run ``factory()`` forever: any crash is logged and the task is restarted with backoff.
+
+    A normal return means "stopped on purpose" and ends supervision.
+    """
+
+    delay = min_delay
+    while True:
+        started = time.monotonic()
+        try:
+            await factory()
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(f"Задача «{name}» упала: {exc}. Перезапуск через {delay:.0f} с")
+        if time.monotonic() - started > 300:
+            delay = min_delay  # worked for a while: the failure is not a crash loop
+        await asyncio.sleep(delay)
+        delay = min(max_delay, delay * 2)
+
+
+async def _telegram_loop(bot: Bot, dispatcher: Dispatcher) -> None:
+    """Connect to Telegram and poll. Network errors raise -> `_supervise` retries with backoff."""
+
+    try:
+        me = await bot.get_me()
+    except TelegramUnauthorizedError:
+        logger.error("Telegram отклонил токен (TELEGRAM_BOT_TOKEN неверный или отозван). Бот отключён, движок работает.")
+        return
+    logger.info(f"Telegram-бот запущен: @{me.username}")
+    await bot.delete_webhook(drop_pending_updates=False)
+    await dispatcher.start_polling(bot, handle_signals=False, close_bot_session=False)
+
+
+def _install_signal_handlers(stop_event: asyncio.Event) -> None:
+    """SIGTERM (docker/Railway stop) and SIGINT -> graceful shutdown. No-op on Windows."""
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+
+
 async def run_service(args: argparse.Namespace) -> int:
     services = await create_services(args)
     engine, notifier, bot = services.engine, services.notifier, services.bot
@@ -266,36 +323,31 @@ async def run_service(args: argparse.Namespace) -> int:
             env=services.env,
         )
         dispatcher = create_dispatcher(ctx, services.env.allowed_ids)
-    tasks: list[asyncio.Task] = [
-        asyncio.create_task(engine.run_forever(), name="engine"),
-        asyncio.create_task(_live_loop(engine), name="live-updates"),
-        asyncio.create_task(_digest_loop(engine), name="digest"),
-    ]
+    stop_event = asyncio.Event()
+    _install_signal_handlers(stop_event)
+    tasks: list[asyncio.Task] = []
     try:
         await engine.initialize()
         await notifier.start()
+        tasks.append(asyncio.create_task(_supervise("engine", engine.run_forever), name="engine"))
+        tasks.append(asyncio.create_task(_supervise("live-updates", lambda: _live_loop(engine)), name="live"))
+        tasks.append(asyncio.create_task(_supervise("digest", lambda: _digest_loop(engine)), name="digest"))
         if dispatcher is not None and bot is not None:
-            try:
-                me = await bot.get_me()
-                logger.info(f"Telegram-бот запущен: @{me.username}")
-                await bot.delete_webhook(drop_pending_updates=False)
-                tasks.append(
-                    asyncio.create_task(
-                        dispatcher.start_polling(bot, handle_signals=False, close_bot_session=False),
-                        name="polling",
-                    )
+            tasks.append(
+                asyncio.create_task(
+                    _supervise("telegram", lambda: _telegram_loop(bot, dispatcher), max_delay=60.0),
+                    name="telegram",
                 )
-            except Exception as exc:
-                logger.error(f"Не удалось запустить Telegram-бота (проверьте TELEGRAM_BOT_TOKEN): {exc}")
+            )
         else:
             logger.info("Telegram-бот не запущен (--no-bot или нет токена): работает только движок")
         logger.info(
-            "Мониторинг запущен: источников %s, включено %s",
-            len(engine.adapters),
-            sum(1 for adapter in engine.adapters if adapter.config.enabled),
+            f"Мониторинг запущен: источников {len(engine.adapters)}, "
+            f"включено {sum(1 for adapter in engine.adapters if adapter.config.enabled)}"
         )
         _touch_heartbeat()
-        await asyncio.gather(*tasks)
+        await stop_event.wait()
+        logger.info("Получен сигнал остановки, завершаю работу…")
     except asyncio.CancelledError:
         pass
     finally:

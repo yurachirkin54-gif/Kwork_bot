@@ -9,7 +9,13 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from loguru import logger
 
 from app.models import (
@@ -239,6 +245,9 @@ def scoring_from_row(row: Job) -> ScoringResult:
 class Notifier:
     """Async send queue with throttling and RetryAfter-safe delivery."""
 
+    # pause before each attempt: first try immediately, then back off on network errors
+    SEND_RETRY_DELAYS: tuple[float, ...] = (0.0, 2.0, 6.0, 15.0)
+
     def __init__(
         self,
         bot: Bot | None,
@@ -323,6 +332,27 @@ class Notifier:
             await asyncio.sleep(wait)
         self._last_send = loop.time()
 
+    async def _send(self, chat_id: int, text: str, reply_markup: Any = None) -> Any:
+        """send_message with retries on flood-wait and transient network/server errors."""
+
+        assert self.bot is not None
+        last_exc: Exception | None = None
+        for delay in self.SEND_RETRY_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await self.bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=reply_markup
+                )
+            except TelegramRetryAfter as exc:
+                last_exc = exc
+                await asyncio.sleep(exc.retry_after + 1)
+            except (TelegramNetworkError, TelegramServerError) as exc:
+                last_exc = exc
+                logger.warning(f"Telegram временно недоступен ({exc}); повтор отправки")
+        assert last_exc is not None
+        raise last_exc
+
     async def _deliver(
         self,
         job: UnifiedJob,
@@ -337,26 +367,15 @@ class Notifier:
         for chat_id in chat_ids:
             await self._throttle()
             try:
-                message = await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode="HTML",
-                    reply_markup=markup,
-                )
-            except TelegramRetryAfter as exc:
-                await asyncio.sleep(exc.retry_after + 1)
-                try:
-                    message = await self.bot.send_message(
-                        chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup
-                    )
-                except Exception as retry_exc:
-                    logger.warning(f"Повторная отправка не удалась: {retry_exc}")
-                    continue
+                message = await self._send(chat_id, text, markup)
             except TelegramForbiddenError:
                 logger.warning(f"Пользователь {chat_id} заблокировал бота")
                 continue
             except TelegramBadRequest as exc:
                 logger.warning(f"Telegram отклонил сообщение: {exc}")
+                continue
+            except Exception as exc:
+                logger.warning(f"Не удалось доставить заказ {job.source}/{job.external_id} в {chat_id}: {exc}")
                 continue
             if db_id:
                 await self.repo.mark_notified(db_id, chat_id, message.message_id, score.total_score)
@@ -379,7 +398,7 @@ class Notifier:
         text = format_digest(jobs)
         for chat_id in self.chat_ids:
             try:
-                message = await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+                message = await self._send(chat_id, text)
             except Exception as exc:
                 logger.warning(f"Дайджест не отправлен {chat_id}: {exc}")
                 continue

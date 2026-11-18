@@ -438,10 +438,12 @@ HTML/RSS/JSON фикстуры лежат в `tests/fixtures/`.
 
 ```bash
 cp .env.example .env      # заполнить токен и ID
-mkdir -p data logs && sudo chown -R 1000:1000 data logs config  # права для botuser (UID 1000)
 docker compose up -d --build
 docker compose logs -f
 ```
+
+Права на `data/` и `logs/` выставляет `docker-entrypoint.sh` сам (контейнер стартует
+от root, делает `chown` и дальше работает от `botuser`) — ручной `chown` не нужен.
 
 `docker-compose.yml`:
 
@@ -453,6 +455,24 @@ docker compose logs -f
 
 Для PostgreSQL: раскомментируйте `DATABASE_URL=postgresql+asyncpg://...`
 и поставьте пакет `asyncpg` (`pip install -r requirements.txt asyncpg`).
+
+### Railway
+
+1. New Project → Deploy from GitHub repo (подхватится `Dockerfile` + `railway.json`,
+   рестарт-политика `ALWAYS`).
+2. Variables: `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS` (файл `.env` в GitHub не попадает).
+3. **Volume:** добавьте Volume и смонтируйте в `/app/data` — иначе база (`kwork.db`) и
+   настройки, сделанные из бота (`/filters`, пауза), обнулятся при каждом деплое.
+4. Сервису не нужен порт/домен — это worker. Дубль-экземпляров не запускайте
+   (`numReplicas` = 1): два процесса с одним токеном мешают друг другу.
+
+Что бот делает сам для беспрерывной работы: перезапускает упавшие фоновые задачи с
+нарастающей паузой, переподключается к Telegram при обрывах сети, повторяет отправку
+карточки при сбоях Telegram и корректно завершается по SIGTERM (деплой/рестарт).
+
+> Включение/добавление бирж через `/sources` пишется в `config/sources.yaml` внутри
+> контейнера и на Railway теряется при пересборке — постоянные изменения вносите в
+> репозиторий. Фильтры и пауза хранятся в базе (на Volume) и сохраняются.
 
 Альтернатива без Docker — `systemd`-юнит:
 

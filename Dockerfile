@@ -17,12 +17,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY config ./config
 COPY pyproject.toml README.md ./
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN mkdir -p /app/data /app/logs \
+# NB: no VOLUME instruction (Railway forbids it). Mount persistent storage at /app/data.
+# The container starts as root only to fix ownership of the mounted volume, then the
+# entrypoint drops privileges to `botuser` (see docker-entrypoint.sh).
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && mkdir -p /app/data /app/logs \
     && useradd --create-home --uid 1000 botuser \
     && chown -R botuser:botuser /app
-USER botuser
 
-VOLUME ["/app/data", "/app/logs"]
-
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python", "-m", "app.main"]
