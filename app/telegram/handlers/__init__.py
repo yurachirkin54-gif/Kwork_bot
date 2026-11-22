@@ -36,11 +36,15 @@ async def safe_edit(
     if not isinstance(message, Message):
         return
     try:
-        await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        await message.edit_text(
+            text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
+        )
     except TelegramBadRequest:
         # Message content unchanged or too old to edit - send a fresh one.
         try:
-            await message.answer(text, parse_mode="HTML", reply_markup=markup)
+            await message.answer(
+                text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
+            )
         except TelegramBadRequest:
             pass
 

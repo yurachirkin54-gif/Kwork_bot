@@ -513,6 +513,38 @@ class Repository:
             )
             return list(rows.scalars())
 
+    async def recent_top_jobs(
+        self,
+        *,
+        limit: int = 10,
+        hours: int = 24,
+        min_score: float = 0.0,
+        max_proposals: int | None = None,
+        exclude_sources: Sequence[str] | None = None,
+        only_unnotified: bool = False,
+    ) -> list[Job]:
+        since = utcnow() - timedelta(hours=max(1, hours))
+        conditions = [
+            Job.is_hidden.is_(False),
+            Job.status.in_(("open", "unknown")),
+            Job.first_seen_at >= since,
+            Job.score >= min_score,
+        ]
+        if only_unnotified:
+            conditions.append(Job.notified_at.is_(None))
+        if max_proposals is not None:
+            conditions.append((Job.proposals_count.is_(None)) | (Job.proposals_count <= max_proposals))
+        if exclude_sources:
+            conditions.append(~Job.source.in_(list(exclude_sources)))
+        async with self._session() as session:
+            rows = await session.execute(
+                select(Job)
+                .where(*conditions)
+                .order_by(Job.score.desc(), Job.published_at.desc(), Job.id.desc())
+                .limit(limit)
+            )
+            return list(rows.scalars())
+
     async def pending_count(self, min_score: float = 0.0) -> int:
         async with self._session() as session:
             rows = await session.execute(

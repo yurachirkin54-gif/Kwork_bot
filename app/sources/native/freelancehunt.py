@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import feedparser
 from loguru import logger
@@ -119,20 +120,34 @@ class FreelanceHuntAdapter(BaseSourceAdapter):
         return jobs
 
     # --------------------------------------------------------------------- RSS
+    @staticmethod
+    def _clean_url(url: str) -> str:
+        parts = urlsplit(url)
+        if not parts.query:
+            return url
+        kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if not k.lower().startswith("utm_")]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
+
     async def _fetch_rss(self) -> list[UnifiedJob]:
         result = await self.fetch_page(self.fallback_rss)
         parsed = feedparser.parse(result.raw if result.raw else result.text)
         if not parsed.entries:
             raise SourceParseError("RSS Freelancehunt пуст", source=self.name)
+        entries = parsed.entries[: self.config.max_items]
+        # Freelancehunt's public RSS currently hardcodes <slash:comments>0</slash:comments>
+        # on every entry regardless of real bids; treat uniform zeros as unknown (None).
+        raw_comments = [str(e.get("slash_comments") or "").strip() for e in entries]
+        comments_are_dummy_zero = len(entries) >= 3 and all(val == "0" for val in raw_comments)
+
         jobs: list[UnifiedJob] = []
-        for entry in parsed.entries[: self.config.max_items]:
+        for entry in entries:
             title = str(entry.get("title") or "").strip()
-            link = str(entry.get("link") or "").strip()
+            link = self._clean_url(str(entry.get("link") or "").strip())
             if not title or not link:
                 continue
             description = self.clean_html(str(entry.get("summary") or entry.get("description") or ""))
             low, high, currency = extract_budget(f"{title} {description}", default_currency="UAH")
-            proposals = entry.get("slash_comments")
+            proposals = None if comments_are_dummy_zero else entry.get("slash_comments")
             if proposals is None:
                 proposals = self.extract_proposals(description)
             try:

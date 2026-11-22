@@ -384,3 +384,119 @@ async def test_notifier_gives_up_after_all_retries() -> None:
     notifier.SEND_RETRY_DELAYS = (0.0, 0.01)
     with pytest.raises(TelegramNetworkError):
         await notifier._send(1, "hello")
+
+
+async def test_freelancehunt_rss_ignores_uniform_dummy_zero_comments_and_strips_utm(
+    make_config, stub_factory, converter, monkeypatch
+) -> None:
+    from app.sources.native.freelancehunt import FreelanceHuntAdapter
+
+    monkeypatch.delenv("FREELANCEHUNT_TOKEN", raising=False)
+    rss = """<?xml version="1.0" encoding="utf-8"?>
+    <rss version="2.0" xmlns:slash="http://purl.org/rss/1.0/modules/slash/">
+      <channel>
+        <item><title>Сделать сайт 1 - 5000UAH</title><link>https://freelancehunt.com/project/p1/1001.html?utm_source=rss&amp;utm_medium=feed</link><description>Нужен сайт</description><slash:comments>0</slash:comments></item>
+        <item><title>Сделать сайт 2 - 6000UAH</title><link>https://freelancehunt.com/project/p2/1002.html?utm_source=rss</link><description>Нужен бот</description><slash:comments>0</slash:comments></item>
+        <item><title>Сделать сайт 3 - 7000UAH</title><link>https://freelancehunt.com/project/p3/1003.html</link><description>Нужен логотип</description><slash:comments>0</slash:comments></item>
+      </channel>
+    </rss>""".encode("utf-8")
+    cfg = make_config(
+        name="freelancehunt",
+        kind="freelancehunt",
+        token_env="FREELANCEHUNT_TOKEN",
+        params={"fallback_rss": "https://freelancehunt.com/projects.rss"},
+    )
+    http = stub_factory({"https://freelancehunt.com/projects.rss": rss})
+    jobs = await FreelanceHuntAdapter(cfg, http, converter).fetch_listing()
+    assert len(jobs) == 3
+    assert all(j.proposals_count is None for j in jobs)
+    assert jobs[0].url == "https://freelancehunt.com/project/p1/1001.html"
+
+
+def test_include_regex_word_boundaries_reject_raboty_v_vk(make_job) -> None:
+    cfg = ConfigManager()
+    flt = HardFilter(cfg.effective_filters())
+    vk_curator = make_job(
+        title="Куратор отвечать на входящие заявки в соц.сетях",
+        description="Нужен куратор для работы в ВК. Отвечать на входящие сообщения по шаблонам.",
+    )
+    tiktok_subs = make_job(
+        title="Подписчики ТикТок",
+        description="Нужно увеличить подписчиков в тикток, боты да, живые не нужны.",
+    )
+    real_vk_bot = make_job(
+        title="Разработать бота для ВК",
+        description="Нужен чат-бот в ВК на Python с интеграцией API.",
+    )
+    assert flt.check(vk_curator).passed is False
+    assert flt.check(tiktok_subs).passed is False
+    assert flt.check(real_vk_bot).passed is True
+
+
+async def test_source_overrides_persist_across_engine_restart(repo, converter, tmp_path) -> None:
+    from app.config import SourceConfig
+
+    repository, _db = repo
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "settings.yaml").write_text("filters:\n  min_budget_rub: 1000\n", encoding="utf-8")
+    (cfg_dir / "sources.yaml").write_text(
+        "sources:\n"
+        "  - name: kwork\n    kind: kwork\n    enabled: true\n    interval_seconds: 60\n"
+        "  - name: fl_ru\n    kind: fl_ru\n    enabled: true\n    interval_seconds: 90\n",
+        encoding="utf-8",
+    )
+
+    eng1 = Engine(ConfigManager(cfg_dir), repository, converter)
+    await eng1.initialize()
+    assert await eng1.set_source_enabled("fl_ru", False) is True
+    assert await eng1.set_source_interval("kwork", 180) is True
+    await eng1.add_custom_source(
+        SourceConfig(name="myrss", kind="rss", enabled=True, url="https://ex.test/rss", params={"url": "https://ex.test/rss"})
+    )
+
+    # Fresh ConfigManager + Engine (simulating Railway redeploy with clean YAML + persistent DB Volume)
+    eng2 = Engine(ConfigManager(cfg_dir), repository, converter)
+    await eng2.initialize()
+    assert eng2.config.get_source("fl_ru").enabled is False
+    assert eng2.config.get_source("kwork").interval_seconds == 180
+    assert eng2.config.get_source("myrss") is not None
+    assert eng2.config.get_source("myrss").enabled is True
+
+    assert await eng2.remove_source("myrss") is True
+    eng3 = Engine(ConfigManager(cfg_dir), repository, converter)
+    await eng3.initialize()
+    assert eng3.config.get_source("myrss") is None
+
+
+async def test_recent_top_jobs_and_new_ui_keyboards(repo, make_job) -> None:
+    from app.telegram.keyboards import (
+        keywords_keyboard,
+        presets_keyboard,
+        proposal_keyboard,
+        source_detail_keyboard,
+        top_jobs_keyboard,
+    )
+
+    repository, _db = repo
+    j1 = make_job(source="kwork", external_id="t1", status="open", proposals_count=1)
+    j2 = make_job(source="fl_ru", external_id="t2", status="open", proposals_count=2)
+    await repository.upsert_job(j1, ScoringResult(base_score=65, total_score=65, components=ScoreComponents()))
+    await repository.upsert_job(j2, ScoringResult(base_score=88, total_score=88, components=ScoreComponents()))
+
+    top = await repository.recent_top_jobs(limit=5, hours=24, min_score=50.0)
+    assert [r.external_id for r in top] == ["t2", "t1"]
+
+    kw_kb = keywords_keyboard("include", [f"kw{i}" for i in range(25)], page=1, per_page=12)
+    kw_data = [b.callback_data for row in kw_kb.inline_keyboard for b in row if b.callback_data]
+    assert "flt:kw:include:0" in kw_data
+    assert "flt:kw:include:2" in kw_data
+    assert "flt:include_deltext" in kw_data
+    assert "flt:kwclear:include" in kw_data
+
+    assert presets_keyboard().inline_keyboard
+    assert source_detail_keyboard("kwork", True, 60, can_delete=False).inline_keyboard
+    assert top_jobs_keyboard([1, 2, 3]).inline_keyboard
+    prop_kb = proposal_keyboard(1, llm_enabled=False, url="https://kwork.ru/projects/1/view")
+    assert prop_kb is not None and any(b.url == "https://kwork.ru/projects/1/view" for row in prop_kb.inline_keyboard for b in row)
+

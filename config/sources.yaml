@@ -206,80 +206,50 @@ sources:
       url: "https://youdo.com/tasks-all-opened-all/"
 
   # ---------------------------------------------------------------------------
-  # 12. EXAMPLE: any niche marketplace via RSS (no code required)
+  # Примеры добавления своих бирж без кода (можно также прямо через /add_source):
   # ---------------------------------------------------------------------------
-  - name: custom_rss_example
-    kind: rss
-    enabled: false
-    interval_seconds: 300
-    timeout: 20
-    currency: RUB
-    max_items: 30
-    params:
-      url: "https://example.com/jobs.rss"
-    regex:
-      budget: "(?i)(?:бюджет|цена|оплата)[:\\s]*([\\d\\s.,]+)\\s*(?:руб|₽|rub|р\\.)"
-      proposals: "(?i)(\\d+)\\s*(?:отклик|заявк|предложен)"
-
-  # ---------------------------------------------------------------------------
-  # 13. EXAMPLE: any niche marketplace via HTML/CSS selectors
-  # ---------------------------------------------------------------------------
-  - name: custom_html_example
-    kind: html
-    enabled: false
-    interval_seconds: 300
-    timeout: 25
-    currency: RUB
-    max_items: 30
-    headers:
-      Accept-Language: "ru-RU,ru;q=0.9,en;q=0.8"
-    params:
-      url: "https://example.com/projects"
-    selectors:
-      item: "div.project-card"
-      title: "a.project-card__title"
-      url: "a.project-card__title@href"
-      price: "span.project-card__price"
-      proposals: "span.project-card__responses"
-      description: "div.project-card__desc"
-      published_at: "time@datetime"
-      status: "span.project-card__status"
-      client_rating: "span.project-card__rating"
-      skills: "span.project-card__tag"
-    regex:
-      budget: "(?i)([\\d\\s.,]{3,})\\s*(?:руб|₽|rub)"
-      proposals: "(?i)(\\d+)"
-
-  # ---------------------------------------------------------------------------
-  # 14. EXAMPLE: JSON/GraphQL API marketplace
-  # ---------------------------------------------------------------------------
-  - name: custom_json_example
-    kind: json
-    enabled: false
-    interval_seconds: 300
-    timeout: 25
-    currency: USD
-    max_items: 50
-    params:
-      url: "https://api.example.com/v1/jobs"
-      method: GET
-      headers:
-        Accept: "application/json"
-      payload: null
-    mapping:
-      items_path: "data.jobs"
-      external_id: "id"
-      title: "title"
-      url: "url"
-      description: "description"
-      budget_min: "budget.from"
-      budget_max: "budget.to"
-      currency: "budget.currency"
-      proposals: "proposals_count"
-      published_at: "created_at"
-      status: "status"
-      client_rating: "client.rating"
-      client_reviews: "client.reviews"
-      skills: "skills"
-      category: "category"
-      url_template: "https://example.com/jobs/{external_id}"
+  # - name: custom_rss_example
+  #   kind: rss
+  #   enabled: false
+  #   interval_seconds: 300
+  #   timeout: 20
+  #   currency: RUB
+  #   max_items: 30
+  #   params:
+  #     url: "https://example.com/jobs.rss"
+  #   regex:
+  #     budget: "(?i)(?:бюджет|цена|оплата)[:\\s]*([\\d\\s.,]+)\\s*(?:руб|₽|rub|р\\.)"
+  #     proposals: "(?i)(\\d+)\\s*(?:отклик|заявк|предложен)"
+  #
+  # - name: custom_html_example
+  #   kind: html
+  #   enabled: false
+  #   interval_seconds: 300
+  #   timeout: 25
+  #   currency: RUB
+  #   max_items: 30
+  #   params:
+  #     url: "https://example.com/projects"
+  #   selectors:
+  #     item: "div.project-card"
+  #     title: "a.project-card__title"
+  #     url: "a.project-card__title@href"
+  #     price: "span.project-card__price"
+  #     proposals: "span.project-card__responses"
+  #     description: "div.project-card__desc"
+  #
+  # - name: custom_json_example
+  #   kind: json
+  #   enabled: false
+  #   interval_seconds: 300
+  #   timeout: 25
+  #   currency: USD
+  #   max_items: 50
+  #   params:
+  #     url: "https://api.example.com/v1/jobs"
+  #   mapping:
+  #     items_path: "data.jobs"
+  #     external_id: "id"
+  #     title: "title"
+  #     url: "url"
+  #     description: "description"

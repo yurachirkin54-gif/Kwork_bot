@@ -13,6 +13,7 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.types import BotCommand
 from loguru import logger
 
 from app.config import ConfigError, ConfigManager, EnvSettings, get_env
@@ -285,6 +286,20 @@ async def _supervise(
         delay = min(max_delay, delay * 2)
 
 
+BOT_COMMANDS = [
+    BotCommand(command="menu", description="Главное меню и статус"),
+    BotCommand(command="top", description="Лучшие свежие заказы сейчас"),
+    BotCommand(command="filters", description="Фильтры, слова и пресеты"),
+    BotCommand(command="sources", description="Биржи: вкл/выкл, интервалы, тест"),
+    BotCommand(command="scan", description="Просканировать все биржи сейчас"),
+    BotCommand(command="stats", description="Статистика за 24ч и 7 дней"),
+    BotCommand(command="pause", description="Поставить рассылку на паузу"),
+    BotCommand(command="resume", description="Возобновить рассылку"),
+    BotCommand(command="add_source", description="Добавить новую биржу"),
+    BotCommand(command="del_source", description="Удалить биржу по имени"),
+]
+
+
 async def _telegram_loop(bot: Bot, dispatcher: Dispatcher) -> None:
     """Connect to Telegram and poll. Network errors raise -> `_supervise` retries with backoff."""
 
@@ -294,6 +309,10 @@ async def _telegram_loop(bot: Bot, dispatcher: Dispatcher) -> None:
         logger.error("Telegram отклонил токен (TELEGRAM_BOT_TOKEN неверный или отозван). Бот отключён, движок работает.")
         return
     logger.info(f"Telegram-бот запущен: @{me.username}")
+    try:
+        await bot.set_my_commands(BOT_COMMANDS)
+    except Exception as exc:
+        logger.debug(f"Не удалось зарегистрировать меню команд: {exc}")
     await bot.delete_webhook(drop_pending_updates=False)
     await dispatcher.start_polling(bot, handle_signals=False, close_bot_session=False)
 

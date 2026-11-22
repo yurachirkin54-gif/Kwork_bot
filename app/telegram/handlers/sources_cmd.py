@@ -22,6 +22,7 @@ from app.telegram.keyboards import (
     back_to_menu_keyboard,
     cancel_keyboard,
     source_confirm_keyboard,
+    source_detail_keyboard,
     source_icon,
     source_kind_keyboard,
     sources_keyboard,
@@ -42,7 +43,12 @@ class AddSource(StatesGroup):
 
 
 async def collect_statuses(ctx: AppContext) -> list[SourceStatus]:
-    statuses = await ctx.repo.source_statuses(24)
+    active_configs = {cfg.name: cfg for cfg in ctx.config.sources}
+    statuses = [
+        status for status in await ctx.repo.source_statuses(24) if status.name in active_configs
+    ]
+    for status in statuses:
+        status.enabled = active_configs[status.name].enabled
     known = {status.name for status in statuses}
     for config in ctx.config.sources:
         if config.name in known:
@@ -57,8 +63,40 @@ async def collect_statuses(ctx: AppContext) -> list[SourceStatus]:
                 notes=config.notes,
             )
         )
-    statuses.sort(key=lambda item: item.name)
+    statuses.sort(key=lambda item: (not item.enabled, item.name))
     return statuses
+
+
+async def build_source_detail(ctx: AppContext, name: str) -> tuple[str, Any] | None:
+    config = ctx.config.get_source(name)
+    if config is None:
+        return None
+    statuses = {s.name: s for s in await collect_statuses(ctx)}
+    status = statuses.get(
+        name,
+        SourceStatus(name=name, kind=config.kind, enabled=config.enabled, state="ok"),
+    )
+    lines = [
+        f"⚙️ <b>Источник: {esc(name)}</b>",
+        "",
+        f"Статус: {source_icon(status)}",
+        f"Тип: <code>{esc(config.kind)}</code>",
+        f"Интервал опроса: <b>{config.interval_seconds} с</b>",
+        f"За 24ч найдено: <b>{status.jobs_24h}</b>",
+    ]
+    if status.last_error:
+        lines.append(f"Последняя ошибка: {esc(status.last_error[:200])}")
+    if config.notes:
+        lines.append(f"Примечание: {esc(config.notes[:200])}")
+    lines.append("")
+    lines.append("Выберите интервал опроса или действие (сохраняется в БД):")
+    markup = source_detail_keyboard(
+        name,
+        config.enabled,
+        config.interval_seconds,
+        can_delete=not ctx.config.is_builtin_source(name),
+    )
+    return "\n".join(lines), markup
 
 
 async def build_sources_view(ctx: AppContext) -> tuple[str, Any]:
@@ -102,15 +140,15 @@ async def cmd_del_source(message: Message, ctx: AppContext, state: FSMContext) -
         await message.answer("Использование: <code>/del_source имя_источника</code>", parse_mode="HTML")
         return
     name = parts[1].strip()
-    if ctx.config.remove_source(name):
-        ctx.engine.rebuild_adapters()
+    if await ctx.engine.remove_source(name):
         await message.answer(f"🗑 Источник <b>{esc(name)}</b> удалён.", parse_mode="HTML")
     else:
         await message.answer(f"Источник <b>{esc(name)}</b> не найден.", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "menu:sources")
-async def cb_sources(callback: CallbackQuery, ctx: AppContext) -> None:
+async def cb_sources(callback: CallbackQuery, ctx: AppContext, state: FSMContext) -> None:
+    await state.clear()
     await callback.answer()
     await show_sources(callback, ctx)
 
@@ -123,11 +161,75 @@ async def cb_toggle_source(callback: CallbackQuery, ctx: AppContext) -> None:
         await callback.answer("Источник не найден", show_alert=True)
         return
     new_state = not config.enabled
-    ctx.config.set_source_enabled(name, new_state)
-    await ctx.repo.set_source_enabled(name, new_state)
-    ctx.engine.rebuild_adapters()
+    await ctx.engine.set_source_enabled(name, new_state)
     await callback.answer("Включён" if new_state else "Выключен")
     await show_sources(callback, ctx)
+
+
+@router.callback_query(F.data.startswith("src:open:"))
+async def cb_open_source(callback: CallbackQuery, ctx: AppContext) -> None:
+    name = (callback.data or "").split(":", 2)[2]
+    view = await build_source_detail(ctx, name)
+    if view is None:
+        await callback.answer("Источник не найден", show_alert=True)
+        return
+    await callback.answer()
+    await safe_edit(callback, view[0], view[1])
+
+
+@router.callback_query(F.data.startswith("src:toggle_detail:"))
+async def cb_toggle_source_detail(callback: CallbackQuery, ctx: AppContext) -> None:
+    name = (callback.data or "").split(":", 2)[2]
+    config = ctx.config.get_source(name)
+    if config is None:
+        await callback.answer("Источник не найден", show_alert=True)
+        return
+    new_state = not config.enabled
+    await ctx.engine.set_source_enabled(name, new_state)
+    await callback.answer("Включён" if new_state else "Выключен")
+    view = await build_source_detail(ctx, name)
+    if view is not None:
+        await safe_edit(callback, view[0], view[1])
+
+
+@router.callback_query(F.data.startswith("src:int:"))
+async def cb_source_interval(callback: CallbackQuery, ctx: AppContext) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4 or not parts[3].isdigit():
+        await callback.answer("Некорректный интервал", show_alert=True)
+        return
+    name = parts[2]
+    seconds = int(parts[3])
+    if not await ctx.engine.set_source_interval(name, seconds):
+        await callback.answer("Источник не найден", show_alert=True)
+        return
+    await callback.answer(f"Интервал: {seconds} с")
+    view = await build_source_detail(ctx, name)
+    if view is not None:
+        await safe_edit(callback, view[0], view[1])
+
+
+@router.callback_query(F.data.startswith("src:del:"))
+async def cb_delete_source(callback: CallbackQuery, ctx: AppContext) -> None:
+    name = (callback.data or "").split(":", 2)[2]
+    if await ctx.engine.remove_source(name):
+        await callback.answer(f"🗑 {name} удалён")
+    else:
+        await callback.answer("Источник не найден", show_alert=True)
+    await show_sources(callback, ctx)
+
+
+@router.callback_query(F.data.startswith("src:check_detail:"))
+async def cb_check_source_detail(callback: CallbackQuery, ctx: AppContext) -> None:
+    name = (callback.data or "").split(":", 2)[2]
+    await callback.answer("Проверяю источник...")
+    ok, message = await ctx.engine.probe_source(name)
+    icon = "✅" if ok else "⚠️"
+    if isinstance(callback.message, Message):
+        await callback.message.answer(f"{icon} <b>{esc(name)}</b>: {esc(message)}", parse_mode="HTML")
+    view = await build_source_detail(ctx, name)
+    if view is not None:
+        await safe_edit(callback, view[0], view[1])
 
 
 @router.callback_query(F.data.startswith("src:check:"))
@@ -193,14 +295,20 @@ async def add_source_name(message: Message, ctx: AppContext, state: FSMContext) 
         return
     await state.update_data(name=name)
     await state.set_state(AddSource.waiting_url)
-    await message.answer("Шаг 2/3. Отправьте URL ленты или страницы со списком заказов (https://...).")
+    await message.answer(
+        "Шаг 2/3. Отправьте URL ленты или страницы со списком заказов (https://...).",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 @router.message(StateFilter(AddSource.waiting_url))
 async def add_source_url(message: Message, ctx: AppContext, state: FSMContext) -> None:
     url = (message.text or "").strip()
     if not url.startswith(("http://", "https://")):
-        await message.answer("Нужен полный URL, начинающийся с http:// или https://")
+        await message.answer(
+            "Нужен полный URL, начинающийся с http:// или https://",
+            reply_markup=cancel_keyboard(),
+        )
         return
     data = await state.get_data()
     kind = data.get("kind")
@@ -210,14 +318,16 @@ async def add_source_url(message: Message, ctx: AppContext, state: FSMContext) -
         await message.answer(
             "Шаг 3/3. CSS-селектор карточки заказа, например <code>div.project-card</code>.",
             parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
         )
         return
     if kind == "json":
         await state.set_state(AddSource.waiting_item)
         await message.answer(
             "Шаг 3/3. Путь к массиву заказов в JSON, например <code>data.jobs</code>.\n"
-            "Пусто - если массив в корне.",
+            "Отправьте <code>-</code>, если массив в корне.",
             parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
         )
         return
     await _preview_source(message, ctx, state)
@@ -226,17 +336,23 @@ async def add_source_url(message: Message, ctx: AppContext, state: FSMContext) -
 @router.message(StateFilter(AddSource.waiting_item))
 async def add_source_item(message: Message, ctx: AppContext, state: FSMContext) -> None:
     value = (message.text or "").strip()
+    if value == "-":
+        value = ""
     data = await state.get_data()
     kind = data.get("kind")
     await state.update_data(item=value)
     if kind == "html":
         if not value:
-            await message.answer("Селектор карточки обязателен. Например: div.project-card")
+            await message.answer(
+                "Селектор карточки обязателен. Например: div.project-card",
+                reply_markup=cancel_keyboard(),
+            )
             return
         await state.set_state(AddSource.waiting_title)
         await message.answer(
             "Укажите CSS-селектор заголовка внутри карточки, например <code>a.title</code>.",
             parse_mode="HTML",
+            reply_markup=cancel_keyboard(),
         )
         return
     await _preview_source(message, ctx, state)
@@ -329,9 +445,7 @@ async def save_new_source(callback: CallbackQuery, ctx: AppContext, state: FSMCo
         await state.clear()
         return
     config = SourceConfig.model_validate(raw)
-    ctx.config.add_source(config)
-    await ctx.repo.set_source_enabled(config.name, True)
-    ctx.engine.rebuild_adapters()
+    await ctx.engine.add_custom_source(config)
     await state.clear()
     await callback.answer("Источник сохранён")
     await show_sources(callback, ctx)

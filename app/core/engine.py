@@ -120,6 +120,10 @@ class Engine:
         overrides = await self.repo.get_setting("filters_overrides", {}) or {}
         if isinstance(overrides, dict):
             self.config.set_runtime_overrides(overrides)
+        source_overrides = await self.repo.get_setting("sources_overrides", {}) or {}
+        if isinstance(source_overrides, dict) and source_overrides:
+            self.config.set_source_overrides(source_overrides)
+            self.rebuild_adapters()
         self._paused = bool(await self.repo.get_setting("paused", False))
         mode = self.config.effective_filters().cold_start_mode
         self._needs_seed = (await self.repo.count_jobs()) == 0 and mode == "silent_seed"
@@ -127,6 +131,60 @@ class Engine:
             logger.info("Холодный старт: текущие заказы будут проиндексированы без рассылки")
         if self._paused:
             logger.info("Рассылка на паузе (сохранено в настройках)")
+
+    async def set_source_enabled(self, name: str, enabled: bool) -> bool:
+        if self.config.get_source(name) is None:
+            return False
+        overrides = self.config.source_overrides
+        overrides["enabled"][name] = bool(enabled)
+        self.config.set_source_overrides(overrides)
+        await self.repo.set_setting("sources_overrides", overrides)
+        await self.repo.set_source_enabled(name, bool(enabled))
+        if enabled:
+            current = self.filters()
+            if name in current.exclude_sources:
+                await self.update_filters(
+                    {"exclude_sources": [s for s in current.exclude_sources if s != name]}
+                )
+            self._next_run[name] = 0.0
+        self.rebuild_adapters()
+        return True
+
+    async def set_source_interval(self, name: str, interval_seconds: int) -> bool:
+        if self.config.get_source(name) is None:
+            return False
+        clamped = max(30, min(3600, int(interval_seconds)))
+        overrides = self.config.source_overrides
+        overrides["intervals"][name] = clamped
+        self.config.set_source_overrides(overrides)
+        await self.repo.set_setting("sources_overrides", overrides)
+        self.rebuild_adapters()
+        return True
+
+    async def add_custom_source(self, source_config) -> None:  # noqa: ANN001
+        overrides = self.config.source_overrides
+        overrides["deleted"] = [n for n in overrides["deleted"] if n != source_config.name]
+        overrides["custom"][source_config.name] = source_config.model_dump(mode="json")
+        overrides["enabled"][source_config.name] = bool(source_config.enabled)
+        self.config.set_source_overrides(overrides)
+        await self.repo.set_setting("sources_overrides", overrides)
+        await self.repo.set_source_enabled(source_config.name, bool(source_config.enabled))
+        self._next_run[source_config.name] = 0.0
+        self.rebuild_adapters()
+
+    async def remove_source(self, name: str) -> bool:
+        if self.config.get_source(name) is None:
+            return False
+        overrides = self.config.source_overrides
+        overrides["custom"].pop(name, None)
+        overrides["enabled"].pop(name, None)
+        overrides["intervals"].pop(name, None)
+        if self.config.is_builtin_source(name) and name not in overrides["deleted"]:
+            overrides["deleted"].append(name)
+        self.config.set_source_overrides(overrides)
+        await self.repo.set_setting("sources_overrides", overrides)
+        self.rebuild_adapters()
+        return True
 
     def rebuild_adapters(self) -> None:
         self.adapters = build_adapters(self.config.sources, self.http, self.converter, self._browser)

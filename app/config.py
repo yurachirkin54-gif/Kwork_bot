@@ -248,9 +248,11 @@ class ConfigManager:
         self.config_dir = path if path.is_absolute() else BASE_DIR / path
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.app = AppConfig()
+        self._base_sources: list[SourceConfig] = []
         self.sources: list[SourceConfig] = []
         self._mtimes: dict[Path, float] = {}
         self._runtime_overrides: dict[str, Any] = {}
+        self._source_overrides: dict[str, Any] = {}
         self.load()
 
     # ------------------------------------------------------------------ load
@@ -308,7 +310,8 @@ class ConfigManager:
                 parsed.append(SourceConfig.model_validate(item))
             except ValidationError as exc:
                 raise ConfigError(f"Ошибка в источнике {item.get('name')!r}: {exc}") from exc
-        self.sources = parsed
+        self._base_sources = parsed
+        self.sources = self._apply_source_overrides()
         self._mtimes = {
             self.settings_path: self.settings_path.stat().st_mtime,
             self.sources_path: self.sources_path.stat().st_mtime,
@@ -329,9 +332,67 @@ class ConfigManager:
         if not changed:
             return False
         overrides = dict(self._runtime_overrides)
+        source_overrides = dict(self._source_overrides)
         self.load()
         self._runtime_overrides = overrides
+        self._source_overrides = source_overrides
+        self.sources = self._apply_source_overrides()
         return True
+
+    # -------------------------------------------------------------- sources DB
+    def set_source_overrides(self, overrides: dict[str, Any] | None) -> None:
+        self._source_overrides = dict(overrides or {})
+        self.sources = self._apply_source_overrides()
+
+    @property
+    def source_overrides(self) -> dict[str, Any]:
+        return {
+            "enabled": dict(self._source_overrides.get("enabled") or {}),
+            "intervals": dict(self._source_overrides.get("intervals") or {}),
+            "custom": dict(self._source_overrides.get("custom") or {}),
+            "deleted": list(self._source_overrides.get("deleted") or []),
+        }
+
+    def is_builtin_source(self, name: str) -> bool:
+        return any(s.name == name for s in self._base_sources)
+
+    def _apply_source_overrides(self) -> list[SourceConfig]:
+        deleted = {str(n) for n in (self._source_overrides.get("deleted") or [])}
+        enabled_map = self._source_overrides.get("enabled") or {}
+        intervals_map = self._source_overrides.get("intervals") or {}
+        custom_map = self._source_overrides.get("custom") or {}
+
+        by_name: dict[str, SourceConfig] = {}
+        order: list[str] = []
+        for base in self._base_sources:
+            if base.name in deleted:
+                continue
+            by_name[base.name] = base.model_copy(deep=True)
+            order.append(base.name)
+        if isinstance(custom_map, dict):
+            for name, raw in custom_map.items():
+                if name in deleted or not isinstance(raw, dict):
+                    continue
+                try:
+                    cfg = SourceConfig.model_validate(raw)
+                except ValidationError:
+                    continue
+                if cfg.name not in by_name:
+                    order.append(cfg.name)
+                by_name[cfg.name] = cfg
+
+        result: list[SourceConfig] = []
+        for name in order:
+            cfg = by_name[name]
+            if isinstance(enabled_map, dict) and name in enabled_map:
+                cfg.enabled = bool(enabled_map[name])
+            if isinstance(intervals_map, dict) and name in intervals_map:
+                try:
+                    cfg.interval_seconds = max(15, int(intervals_map[name]))
+                except (TypeError, ValueError):
+                    pass
+            result.append(cfg)
+        return result
 
     # -------------------------------------------------------------- filters
     def set_runtime_overrides(self, overrides: dict[str, Any] | None) -> None:
@@ -392,11 +453,14 @@ class ConfigManager:
     def _persist_sources(self) -> None:
         payload = {"sources": [s.model_dump(mode="json") for s in self.sources]}
         header = "# Managed by Kwork_bot - edited automatically when sources change from Telegram.\n"
-        self.sources_path.write_text(
-            header + yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
-        self._mtimes[self.sources_path] = self.sources_path.stat().st_mtime
+        try:
+            self.sources_path.write_text(
+                header + yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            self._mtimes[self.sources_path] = self.sources_path.stat().st_mtime
+        except OSError:
+            pass
 
 
 def load_config(config_dir: str | Path | None = None) -> ConfigManager:

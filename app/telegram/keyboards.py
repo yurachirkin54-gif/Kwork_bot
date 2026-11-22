@@ -44,16 +44,39 @@ def menu_keyboard(paused: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📊 Статус", callback_data="menu:status"),
-                InlineKeyboardButton(text="📈 Статистика", callback_data="menu:stats"),
+                InlineKeyboardButton(text="🔥 Лучшие заказы", callback_data="menu:top"),
+                InlineKeyboardButton(text="🔄 Сканировать", callback_data="menu:scan"),
             ],
             [
                 InlineKeyboardButton(text="🎛 Фильтры", callback_data="menu:filters"),
                 InlineKeyboardButton(text="🌐 Источники", callback_data="menu:sources"),
             ],
-            [toggle, InlineKeyboardButton(text="🔄 Сканировать", callback_data="menu:scan")],
+            [
+                InlineKeyboardButton(text="📊 Статус", callback_data="menu:status"),
+                InlineKeyboardButton(text="📈 Статистика", callback_data="menu:stats"),
+            ],
+            [toggle],
         ]
     )
+
+
+def top_jobs_keyboard(job_ids: Sequence[int]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    chunk: list[InlineKeyboardButton] = []
+    for idx, job_id in enumerate(job_ids[:10], start=1):
+        chunk.append(InlineKeyboardButton(text=f"📄 {idx}", callback_data=f"job:card:{job_id}"))
+        if len(chunk) == 5:
+            rows.append(chunk)
+            chunk = []
+    if chunk:
+        rows.append(chunk)
+    rows.append(
+        [
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="menu:top"),
+            InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def back_to_menu_keyboard() -> InlineKeyboardMarkup:
@@ -88,32 +111,26 @@ def filters_keyboard(filters: UserFilters) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🌅 Конец", callback_data="flt:quiet_end"),
         ],
         [
-            InlineKeyboardButton(text="➕ Ключевое слово", callback_data="flt:include_add"),
-            InlineKeyboardButton(text="➕ Стоп-слово", callback_data="flt:exclude_add"),
+            InlineKeyboardButton(
+                text=f"✅ Ключевые ({len(filters.include_keywords)})",
+                callback_data="flt:kw:include:0",
+            ),
+            InlineKeyboardButton(
+                text=f"⛔ Стоп-слова ({len(filters.exclude_keywords)})",
+                callback_data="flt:kw:exclude:0",
+            ),
         ],
+        [InlineKeyboardButton(text="🎯 Пресеты профиля", callback_data="flt:presets")],
     ]
-    keyword_rows: list[list[InlineKeyboardButton]] = []
-    for index, keyword in enumerate(filters.include_keywords[-10:]):
-        real_index = max(0, len(filters.include_keywords) - 10) + index
-        keyword_rows.append(
+    if filters.exclude_sources:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"✅ {keyword[:24]} ✖",
-                    callback_data=f"flt:kwdel:include:{real_index}",
+                    text=f"👁 Вернуть скрытые биржи ({len(filters.exclude_sources)})",
+                    callback_data="flt:clear_excl_src",
                 )
             ]
         )
-    for index, keyword in enumerate(filters.exclude_keywords[-12:]):
-        real_index = max(0, len(filters.exclude_keywords) - 12) + index
-        keyword_rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"⛔ {keyword[:24]} ✖",
-                    callback_data=f"flt:kwdel:exclude:{real_index}",
-                )
-            ]
-        )
-    rows.extend(keyword_rows)
     rows.append(
         [
             InlineKeyboardButton(text="♻️ Сбросить", callback_data="flt:reset"),
@@ -121,6 +138,67 @@ def filters_keyboard(filters: UserFilters) -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def keywords_keyboard(
+    target: str, keywords: Sequence[str], page: int = 0, per_page: int = 12
+) -> InlineKeyboardMarkup:
+    total = len(keywords)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    slice_items = list(keywords[start : start + per_page])
+    icon = "✅" if target == "include" else "⛔"
+
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for offset, word in enumerate(slice_items):
+        real_index = start + offset
+        pair.append(
+            InlineKeyboardButton(
+                text=f"{icon} {word[:18]} ✖",
+                callback_data=f"flt:kwdel:{target}:{real_index}:{page}",
+            )
+        )
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=f"flt:kw:{target}:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="flt:noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=f"flt:kw:{target}:{page + 1}"))
+        rows.append(nav)
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="➕ Добавить", callback_data=f"flt:{target}_add"),
+            InlineKeyboardButton(text="🗑 Удалить текстом", callback_data=f"flt:{target}_deltext"),
+        ]
+    )
+    bottom: list[InlineKeyboardButton] = []
+    if total > 0:
+        bottom.append(InlineKeyboardButton(text="🧹 Очистить все", callback_data=f"flt:kwclear:{target}"))
+    bottom.append(InlineKeyboardButton(text="⬅️ К фильтрам", callback_data="menu:filters"))
+    rows.append(bottom)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def presets_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💻+🎨 Вайбкодинг + ИИ (мой профиль)", callback_data="flt:preset:default")],
+            [InlineKeyboardButton(text="💻 Только код / боты / сайты", callback_data="flt:preset:code")],
+            [InlineKeyboardButton(text="🎬 Только ИИ-видео / лого / дизайн", callback_data="flt:preset:ai_creative")],
+            [InlineKeyboardButton(text="🌍 Вообще все заказы (без ключевых)", callback_data="flt:preset:all")],
+            [InlineKeyboardButton(text="⬅️ К фильтрам", callback_data="menu:filters")],
+        ]
+    )
 
 
 STATE_ICONS = {
@@ -149,8 +227,9 @@ def sources_keyboard(statuses: Sequence[SourceStatus]) -> InlineKeyboardMarkup:
         toggle_text = "⏸" if status.enabled else "▶️"
         rows.append(
             [
-                InlineKeyboardButton(text=f"{toggle_text} {status.name[:18]}", callback_data=f"src:toggle:{status.name}"),
-                InlineKeyboardButton(text="🔍 Проверить", callback_data=f"src:check:{status.name}"),
+                InlineKeyboardButton(text=f"{toggle_text} {status.name[:16]}", callback_data=f"src:toggle:{status.name}"),
+                InlineKeyboardButton(text="🔍", callback_data=f"src:check:{status.name}"),
+                InlineKeyboardButton(text="⚙️", callback_data=f"src:open:{status.name}"),
             ]
         )
     rows.append(
@@ -159,6 +238,29 @@ def sources_keyboard(statuses: Sequence[SourceStatus]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:main"),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def source_detail_keyboard(name: str, enabled: bool, interval: int, *, can_delete: bool = True) -> InlineKeyboardMarkup:
+    toggle_label = "⏸ Выключить" if enabled else "▶️ Включить"
+    intervals = [60, 120, 300, 600]
+    interval_row = [
+        InlineKeyboardButton(
+            text=f"{'• ' if interval == sec else ''}{sec}с",
+            callback_data=f"src:int:{name}:{sec}",
+        )
+        for sec in intervals
+    ]
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text=toggle_label, callback_data=f"src:toggle_detail:{name}"),
+            InlineKeyboardButton(text="🔍 Проверить", callback_data=f"src:check_detail:{name}"),
+        ],
+        interval_row,
+    ]
+    if can_delete:
+        rows.append([InlineKeyboardButton(text="🗑 Удалить источник", callback_data=f"src:del:{name}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К источникам", callback_data="menu:sources")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -202,11 +304,15 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def proposal_keyboard(job_id: int, *, llm_enabled: bool = False) -> InlineKeyboardMarkup | None:
-    if not llm_enabled:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def proposal_keyboard(
+    job_id: int, *, llm_enabled: bool = False, url: str | None = None
+) -> InlineKeyboardMarkup | None:
+    rows: list[list[InlineKeyboardButton]] = []
+    open_url = _valid_url(url)
+    if open_url:
+        rows.append([InlineKeyboardButton(text="🔗 Открыть заказ", url=open_url)])
+    if llm_enabled:
+        rows.append(
             [InlineKeyboardButton(text="🔄 Перегенерировать (AI)", callback_data=f"job:proposal_regen:{job_id}")]
-        ]
-    )
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None

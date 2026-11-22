@@ -63,7 +63,35 @@ async def _send_proposal(callback: CallbackQuery, ctx: AppContext, *, regenerate
         await reply_long(
             callback.message,
             text,
-            markup=proposal_keyboard(job_id, llm_enabled=ctx.llm.enabled),
+            markup=proposal_keyboard(job_id, llm_enabled=ctx.llm.enabled, url=row.url),
+        )
+
+
+@router.callback_query(F.data.startswith("job:card:"))
+async def cb_open_card(callback: CallbackQuery, ctx: AppContext) -> None:
+    job_id = _job_id(callback.data)
+    if job_id is None:
+        await callback.answer("Некорректная кнопка", show_alert=True)
+        return
+    row = await ctx.repo.get_job(job_id)
+    if row is None:
+        await callback.answer("Заказ не найден", show_alert=True)
+        return
+    await callback.answer()
+    posts = await ctx.repo.cross_posts_for(row.id)
+    notification = await ctx.repo.notification_for_job(row.id)
+    stale_reason = notification.stale_reason if notification and notification.status == "stale" else None
+    text = format_job_card(
+        row.to_unified(),
+        scoring_from_row(row),
+        stale_reason=stale_reason,
+        cross_posts=[p.source for p in posts],
+    )
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=job_keyboard(row.id, row.url),
         )
 
 
@@ -86,7 +114,8 @@ async def cb_refresh(callback: CallbackQuery, ctx: AppContext) -> None:
     await callback.answer("Обновляю...")
     row, message = await ctx.engine.refresh_job(job_id)
     if row is None:
-        await callback.answer(message, show_alert=True)
+        if isinstance(callback.message, Message):
+            await callback.message.answer(f"⚠️ {esc(message)}", parse_mode="HTML")
         return
     posts = await ctx.repo.cross_posts_for(row.id)
     notification = await ctx.repo.notification_for_job(row.id)
@@ -156,11 +185,12 @@ async def cb_hide_source(callback: CallbackQuery, ctx: AppContext) -> None:
     if row is None:
         await callback.answer("Заказ не найден", show_alert=True)
         return
-    filters = ctx.engine.filters()
-    excluded = list(dict.fromkeys([*filters.exclude_sources, row.source]))
-    await ctx.engine.update_filters({"exclude_sources": excluded})
+    if not await ctx.engine.set_source_enabled(row.source, False):
+        filters = ctx.engine.filters()
+        excluded = list(dict.fromkeys([*filters.exclude_sources, row.source]))
+        await ctx.engine.update_filters({"exclude_sources": excluded})
     await ctx.repo.set_job_hidden(job_id, True)
-    await callback.answer(f"🙈 Источник {row.source} отключён")
+    await callback.answer(f"🙈 Источник {row.source} выключен (вернуть: /sources)")
     if isinstance(callback.message, Message):
         await callback.message.edit_reply_markup(reply_markup=None)
 
