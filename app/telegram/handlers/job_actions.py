@@ -80,7 +80,14 @@ async def cb_open_card(callback: CallbackQuery, ctx: AppContext) -> None:
     await callback.answer()
     posts = await ctx.repo.cross_posts_for(row.id)
     notification = await ctx.repo.notification_for_job(row.id)
-    stale_reason = notification.stale_reason if notification and notification.status == "stale" else None
+    computed_stale = ctx.engine.stale_reason_for(row)
+    stale_reason = computed_stale or (
+        notification.stale_reason if notification and notification.status == "stale" else None
+    )
+    if computed_stale and notification is not None and notification.status != "stale":
+        await ctx.repo.advance_notification(
+            notification.id, notification.check_stage, status="stale", stale_reason=computed_stale
+        )
     text = format_job_card(
         row.to_unified(),
         scoring_from_row(row),
@@ -119,7 +126,14 @@ async def cb_refresh(callback: CallbackQuery, ctx: AppContext) -> None:
         return
     posts = await ctx.repo.cross_posts_for(row.id)
     notification = await ctx.repo.notification_for_job(row.id)
-    stale_reason = notification.stale_reason if notification and notification.status == "stale" else None
+    computed_stale = ctx.engine.stale_reason_for(row)
+    stale_reason = computed_stale or (
+        notification.stale_reason if notification and notification.status == "stale" else None
+    )
+    if computed_stale and notification is not None and notification.status != "stale":
+        await ctx.repo.advance_notification(
+            notification.id, notification.check_stage, status="stale", stale_reason=computed_stale
+        )
     text = format_job_card(
         row.to_unified(),
         scoring_from_row(row),

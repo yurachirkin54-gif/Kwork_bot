@@ -35,12 +35,16 @@ async def safe_edit(
     message = callback.message
     if not isinstance(message, Message):
         return
+    if len(text) > 4000:
+        text = text[:3990].rstrip() + "\n…"
     try:
         await message.edit_text(
             text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
         )
-    except TelegramBadRequest:
-        # Message content unchanged or too old to edit - send a fresh one.
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        # Message too old / cannot be edited - send a fresh one.
         try:
             await message.answer(
                 text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True

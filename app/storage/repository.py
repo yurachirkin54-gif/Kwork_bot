@@ -470,7 +470,10 @@ class Repository:
                 .order_by(func.count(Job.id).desc())
             )
             top = await session.execute(
-                select(Job).where(Job.first_seen_at >= since).order_by(Job.score.desc()).limit(5)
+                select(Job)
+                .where(Job.first_seen_at >= since, Job.is_hidden.is_(False))
+                .order_by(Job.score.desc())
+                .limit(5)
             )
             return {
                 "hours": hours,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -103,6 +104,7 @@ class Engine:
         self.adapters = build_adapters(config.sources, self.http, converter, browser)
         self._adapters: dict[str, BaseSourceAdapter] = {a.name: a for a in self.adapters}
         self._breakers: dict[str, CircuitBreaker] = {}
+        self._scan_locks: dict[str, asyncio.Lock] = {}
         self._next_run: dict[str, float] = {}
         self._stop = asyncio.Event()
         self._semaphore = asyncio.Semaphore(max(1, config.app.engine.max_concurrency))
@@ -245,6 +247,13 @@ class Engine:
             self._breakers[name] = breaker
         return breaker
 
+    def _scan_lock_for(self, name: str) -> asyncio.Lock:
+        lock = self._scan_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._scan_locks[name] = lock
+        return lock
+
     # ------------------------------------------------------------------- scanning
     async def scan_once(self, names: list[str] | None = None, force: bool = False) -> list[ScanReport]:
         if self.config.maybe_reload():
@@ -284,6 +293,12 @@ class Engine:
         return reports
 
     async def _scan_adapter(
+        self, adapter: BaseSourceAdapter, *, cold_start: bool = False, force: bool = False
+    ) -> ScanReport:
+        async with self._scan_lock_for(adapter.name):
+            return await self._scan_adapter_locked(adapter, cold_start=cold_start, force=force)
+
+    async def _scan_adapter_locked(
         self, adapter: BaseSourceAdapter, *, cold_start: bool = False, force: bool = False
     ) -> ScanReport:
         report = ScanReport(source=adapter.name)
@@ -368,8 +383,8 @@ class Engine:
             "error": "сетевая ошибка или 5xx",
         }.get(state, state)
         text = (
-            f"⚠️ <b>Источник {adapter.name}</b>: {readable}\n"
-            f"Причина: {error[:400]}\n"
+            f"⚠️ <b>Источник {html.escape(adapter.name)}</b>: {readable}\n"
+            f"Причина: {html.escape(error[:400])}\n"
             + (f"Пауза: {cooldown // 60} мин.\n" if cooldown else "")
             + "Сканирование остальных источников продолжается."
         )
@@ -389,14 +404,15 @@ class Engine:
         for job in listing:
             if job.budget_value is not None and job.budget_rub is None:
                 await self.converter.enrich(job)
-            score = scorer.score(job)
+            passed = hard_filter.check(job).passed
+            score = scorer.score(job) if passed else None
             row, created = await self.repo.upsert_job(job, score)
-            if job.status in ("closed", "in_progress"):
+            if not passed or job.status in ("closed", "in_progress"):
                 await self.repo.set_job_hidden(row.id, True)
             elif created:
                 # Silently mark as seen: no push, no morning-digest spam.
                 await self.repo.mark_seeded(row.id)
-            if hard_filter.check(job).passed and score.total_score >= filters.min_notify_score:
+            if passed and score is not None and score.total_score >= filters.min_notify_score:
                 candidates.append((job, score, row.id))
         report.seeded = len(listing)
 
@@ -609,37 +625,59 @@ class Engine:
             sent_at = as_utc(notification.sent_at) or now
             if (now - sent_at) < timedelta(minutes=offsets[stage]):
                 continue
-            reason = await self._stale_reason(job_row, filters, settings)
+            fresh_row, changed, reason = await self._check_live_status(job_row, filters, settings)
             if reason and self.notifier is not None and notification.message_id:
-                posts = await self.repo.cross_posts_for(job_row.id)
+                posts = await self.repo.cross_posts_for(fresh_row.id)
                 await self.notifier.mark_stale(
-                    notification, job_row, reason, cross_posts=[p.source for p in posts]
+                    notification, fresh_row, reason, cross_posts=[p.source for p in posts]
                 )
                 await self.repo.advance_notification(
                     notification.id, stage + 1, status="stale", stale_reason=reason
                 )
             else:
+                if changed and self.notifier is not None and notification.message_id and hasattr(self.notifier, "refresh_card"):
+                    posts = await self.repo.cross_posts_for(fresh_row.id)
+                    await self.notifier.refresh_card(
+                        notification, fresh_row, cross_posts=[p.source for p in posts]
+                    )
                 await self.repo.advance_notification(notification.id, stage + 1)
             updated += 1
         return updated
 
-    async def _stale_reason(
+    def stale_reason_for(self, job_row: Job, filters: UserFilters | None = None) -> str | None:
+        """Pure staleness check against current status and proposal thresholds."""
+
+        active_filters = filters or self.filters()
+        settings = self.config.app.engine
+        if job_row.status in ("closed", "in_progress"):
+            return "заказ закрыт" if job_row.status == "closed" else "заказ уже в работе"
+        proposals = job_row.proposals_count
+        if proposals is not None:
+            threshold = max(
+                int(active_filters.max_proposals * settings.live_stale_proposals_factor),
+                int(settings.live_stale_proposals_absolute),
+            )
+            if proposals >= threshold:
+                return f"много откликов ({proposals})"
+        return None
+
+    async def _check_live_status(
         self,
         job_row: Job,
         filters: UserFilters,
         settings: Any,
-    ) -> str | None:
+    ) -> tuple[Job, bool, str | None]:
+        changed = False
         adapter = self.get_adapter(job_row.source)
         if adapter is not None:
             unified = job_row.to_unified()
             if adapter.needs_details(unified) or adapter.kind in {"kwork", "fl_ru", "habr_freelance", "freelance_ru"}:
                 try:
                     refreshed = await adapter.fetch_details(unified)
-                    changed = False
                     if refreshed.proposals_count is not None and refreshed.proposals_count != job_row.proposals_count:
                         job_row = await self.repo.update_job(job_row.id, proposals_count=refreshed.proposals_count) or job_row
                         changed = True
-                    if refreshed.status != job_row.status:
+                    if refreshed.status != job_row.status and refreshed.status != "unknown":
                         job_row = await self.repo.update_job(job_row.id, status=refreshed.status) or job_row
                         changed = True
                     if changed:
@@ -647,17 +685,7 @@ class Engine:
                 except SourceError as exc:
                     logger.debug(f"Live: не удалось проверить {job_row.source}/{job_row.external_id}: {exc}")
 
-        if job_row.status in ("closed", "in_progress"):
-            return "заказ закрыт" if job_row.status == "closed" else "заказ уже в работе"
-        proposals = job_row.proposals_count
-        if proposals is not None:
-            threshold = max(
-                int(filters.max_proposals * settings.live_stale_proposals_factor),
-                int(settings.live_stale_proposals_absolute),
-            )
-            if proposals >= threshold:
-                return f"много откликов ({proposals})"
-        return None
+        return job_row, changed, self.stale_reason_for(job_row, filters)
 
     async def maybe_cleanup_old_jobs(self, days: int = 30) -> int:
         """Once per local day prune old hidden noise jobs that left active feeds."""

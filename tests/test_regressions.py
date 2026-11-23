@@ -500,3 +500,109 @@ async def test_recent_top_jobs_and_new_ui_keyboards(repo, make_job) -> None:
     prop_kb = proposal_keyboard(1, llm_enabled=False, url="https://kwork.ru/projects/1/view")
     assert prop_kb is not None and any(b.url == "https://kwork.ru/projects/1/view" for row in prop_kb.inline_keyboard for b in row)
 
+
+async def test_alert_source_problem_escapes_html(config_manager, repo, converter) -> None:
+    repository, _db = repo
+    alerts: list[str] = []
+
+    class AlertCapture:
+        async def send_health_alert(self, text: str) -> None:
+            alerts.append(text)
+
+    from tests.test_engine_flow import FakeAdapter
+
+    engine = Engine(config_manager, repository, converter, notifier=AlertCapture())
+    adapter = FakeAdapter("kwork", [])
+    await engine._alert_source_problem(adapter, "blocked", "<html><title>403 & Denied</title></html>", 300)
+    assert len(alerts) == 1
+    assert "<html>" not in alerts[0]
+    assert "&lt;html&gt;" in alerts[0]
+    assert "403 &amp; Denied" in alerts[0]
+
+
+async def test_safe_edit_ignores_not_modified_without_spam() -> None:
+    from aiogram.exceptions import TelegramBadRequest
+    from app.telegram.handlers import safe_edit
+
+    msg = MagicMock(spec=Message)
+    msg.edit_text = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="Bad Request: message is not modified"))
+    msg.answer = AsyncMock()
+    cb = MagicMock()
+    cb.message = msg
+
+    await safe_edit(cb, "same text")
+    msg.answer.assert_not_called()
+
+
+async def test_cold_start_hides_filtered_noise_from_top_and_stats(config_manager, repo, converter, make_job) -> None:
+    repository, _db = repo
+    from tests.test_engine_flow import FakeAdapter, attach
+
+    engine = Engine(config_manager, repository, converter)
+    good = make_job(source="kwork", external_id="good1", title="Создать Telegram-бота на Python", description="Нужен бот для магазина", budget_rub=5000, proposals_count=1)
+    bad = make_job(source="kwork", external_id="bad1", title="Казино ставки 18+", description="Нужно казино и ставки", budget_rub=50000, proposals_count=0)
+    attach(engine, FakeAdapter("kwork", [good, bad]))
+    await engine.initialize()
+    await engine.scan_once(names=["kwork"])
+
+    top = await repository.recent_top_jobs(limit=10, hours=24)
+    assert [row.external_id for row in top] == ["good1"]
+    stats = await repository.stats(24)
+    assert [item["title"] for item in stats["top"]] == ["Создать Telegram-бота на Python"]
+
+
+async def test_live_updates_refreshes_card_with_updated_proposals(config_manager, repo, converter, make_job) -> None:
+    repository, database = repo
+    refreshed_seen: list[tuple[int | None, str | None]] = []
+
+    class TrackingNotifier:
+        async def refresh_card(self, notification, row, *, stale_reason=None, cross_posts=None) -> None:
+            refreshed_seen.append((row.proposals_count, stale_reason))
+
+        async def mark_stale(self, notification, row, reason, *, cross_posts=None) -> None:
+            refreshed_seen.append((row.proposals_count, reason))
+
+    from tests.test_engine_flow import FakeAdapter, attach
+
+    class LiveFakeAdapter(FakeAdapter):
+        def __init__(self, name: str, next_proposals: int) -> None:
+            super().__init__(name, [])
+            self.next_proposals = next_proposals
+
+        def needs_details(self, job) -> bool:
+            return True
+
+        async def fetch_details(self, job):
+            copy = job.model_copy(deep=True)
+            copy.proposals_count = self.next_proposals
+            copy.status = "open"
+            return copy
+
+    engine = Engine(config_manager, repository, converter, notifier=TrackingNotifier())
+    adapter = LiveFakeAdapter("kwork", next_proposals=3)
+    attach(engine, adapter)
+
+    job = make_job(source="kwork", external_id="live1", proposals_count=0, status="open")
+    row, _ = await repository.upsert_job(job, ScoringResult(base_score=75, total_score=75, components=ScoreComponents()))
+    notif = await repository.mark_notified(row.id, chat_id=1, message_id=50, score=75)
+    async with database.session() as session:
+        n = await session.get(Notification, notif.id)
+        n.sent_at = utcnow() - timedelta(minutes=5)
+        await session.commit()
+
+    await engine.live_updates_once()
+    assert refreshed_seen == [(3, None)]
+
+    # Next stage: jumps to 15 proposals -> must mark stale WITH updated proposals_count=15 (not old 3!)
+    adapter.next_proposals = 15
+    async with database.session() as session:
+        n = await session.get(Notification, notif.id)
+        n.sent_at = utcnow() - timedelta(minutes=15)
+        await session.commit()
+
+    await engine.live_updates_once()
+    assert len(refreshed_seen) == 2
+    assert refreshed_seen[1][0] == 15
+    assert "15" in (refreshed_seen[1][1] or "")
+
+
